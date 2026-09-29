@@ -1,0 +1,32 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api/router?path=:path*"
+    },
+    {
+      "source": "/f/:id",
+      "destination": "/api/router?path=file&id=:id"
+    },
+    {
+      "source": "/((?!api/|assets/|.*\\..*).*)",
+      "destination": "/index.html"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/digest?mode=daily",
+      "schedule": "0 14 * * *"
+    },
+    {
+      "path": "/api/digest?mode=weekly",
+      "schedule": "0 0 * * 1"
+    }
+  ],
+  "functions": {
+    "api/router.ts": {
+      "maxDuration": 300
+    }
+  }
+}

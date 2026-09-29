@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens ─────────────────────────────────────────────────────────
+   iOS-style grouped surfaces: a soft canvas, white (or elevated dark) cards,
+   hairline separators, three levels of ink, one tinted accent, and soft
+   semantic tints. Values are RGB triplets so Tailwind's opacity modifiers work
+   (bg-surface/80). Dark mode follows the device. */
+:root {
+  color-scheme: light dark;
+  --canvas: 242 242 247;
+  --surface: 255 255 255;
+  --fill: 238 239 243;
+  --line: 224 224 230;
+  --ink: 28 28 30;
+  --ink-2: 72 72 78;
+  --ink-3: 138 138 146;
+  --ink-4: 196 196 204;
+  --accent: 37 99 235;
+  --accent-soft: 232 240 254;
+  --danger: 220 38 38;
+  --danger-soft: 254 236 236;
+  --warn: 180 83 9;
+  --warn-soft: 254 243 222;
+  --ok: 5 150 105;
+  --ok-soft: 224 246 236;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: 0 0 0;
+    --surface: 28 28 30;
+    --fill: 44 44 46;
+    --line: 56 56 58;
+    --ink: 242 242 247;
+    --ink-2: 209 209 214;
+    --ink-3: 142 142 147;
+    --ink-4: 72 72 74;
+    --accent: 96 150 255;
+    --accent-soft: 24 40 72;
+    --danger: 255 105 97;
+    --danger-soft: 62 30 30;
+    --warn: 255 179 64;
+    --warn-soft: 58 44 18;
+    --ok: 52 199 123;
+    --ok-soft: 20 52 38;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--canvas));
+  color: rgb(var(--ink));
+  -webkit-font-smoothing: antialiased;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Large titles read best with tight tracking. */
+h1 {
+  letter-spacing: -0.02em;
+}
+
+/* iOS Safari zooms the page when a focused field's font is under 16px.
+   Keep every text field at 16px on phones (the 6-digit code field is larger already). */
+@media (max-width: 767px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([inputmode="numeric"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+}
+
+/* Native-feeling form controls in both modes. */
+input,
+textarea,
+select {
+  color: rgb(var(--ink));
+}
+input::placeholder,
+textarea::placeholder {
+  color: rgb(var(--ink-3));
+}
+input[type="date"],
+input[type="time"] {
+  color-scheme: light dark;
+}
+
+/* Horizontal chip rows scroll by swipe; no scrollbar strip. */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Respect iOS safe areas. */
+.safe-bottom {
+  padding-bottom: calc(0.375rem + env(safe-area-inset-bottom));
+}
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}

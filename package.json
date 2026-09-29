@@ -1,0 +1,48 @@
+{
+  "name": "family-hq",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.api.json"
+  },
+  "dependencies": {
+    "@1password/sdk": "^0.5.0",
+    "@anthropic-ai/sdk": "^0.101.0",
+    "@upstash/redis": "^1.38.0",
+    "@vercel/analytics": "^2.0.1",
+    "@vercel/functions": "^3.9.9",
+    "googleapis": "^173.0.0",
+    "imapflow": "^1.3.6",
+    "mailparser": "^3.9.9",
+    "marked": "^18.0.14",
+    "node-ical": "^0.27.2",
+    "nodemailer": "^8.0.10",
+    "playwright-core": "^1.63.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^25.9.2",
+    "@types/nodemailer": "^8.0.0",
+    "@types/react": "^18.3.5",
+    "@types/react-dom": "^18.3.0",
+    "@types/web-push": "^3.6.4",
+    "@vercel/node": "^5.8.12",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "playwright": "^1.63.0",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "tsx": "^4.22.4",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.8",
+    "vite-plugin-pwa": "^0.20.5"
+  }
+}
