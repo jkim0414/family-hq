@@ -112,3 +112,7 @@ inbox for Kimi (`IMAP_USER` / `IMAP_PASS`). Everything else (parents' Gmail, Bro
   them if you change the agent.
 - Your data lives in your own Redis and hosting accounts. Model providers process it under
   their API terms.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Use it, fork it, make it yours.
