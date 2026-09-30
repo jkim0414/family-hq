@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { fmtDateTime } from "../store";
-import { Card, Collapsible, TextAction } from "./ui";
+import { Card, Collapsible, TextAction, PrivateTag } from "./ui";
 
 export interface FileRow {
   id: string;
@@ -8,6 +8,7 @@ export interface FileRow {
   createdAt: string;
   public: boolean;
   url: string;
+  privateTo?: string;
 }
 
 // Pages the assistant produced (comparisons, plans, itineraries). Private
@@ -58,7 +59,7 @@ export function FilesList() {
             <div key={f.id} className="px-4 py-3">
               <div className="flex items-start justify-between gap-2">
                 <a href={f.url} target="_blank" rel="noreferrer" className="min-w-0 break-words text-sm font-semibold text-accent">
-                  📄 {f.title}
+                  📄 {f.title}{f.privateTo && <PrivateTag className="ml-1.5" />}
                 </a>
                 <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${f.public ? "bg-ok-soft text-ok" : "bg-fill text-ink-3"}`}>
                   {f.public ? "Shared" : "Private"}

@@ -6,7 +6,7 @@ import type { FileDoc } from "../../src/data/types";
 // Files: rendered pages the assistant produces (comparisons, plans, itineraries).
 // Private by default (login required); a share token makes one publicly viewable.
 
-export async function createFile(input: { title: string; markdown: string; taskId?: string }): Promise<FileDoc> {
+export async function createFile(input: { title: string; markdown: string; taskId?: string; privateTo?: "alex" | "sam" }): Promise<FileDoc> {
   const now = new Date().toISOString();
   const doc: FileDoc = {
     id: `f-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`,
@@ -16,6 +16,7 @@ export async function createFile(input: { title: string; markdown: string; taskI
     updatedAt: now,
     public: false,
     taskId: input.taskId,
+    privateTo: input.privateTo,
   };
   await saveFile(doc);
   await addAudit({ kind: "file_created", summary: `File: ${doc.title}`, by: "agent", ref: doc.id });

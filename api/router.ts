@@ -21,6 +21,7 @@ import digest from "./_routes/digest.js";
 import chat from "./_routes/chat.js";
 import tasks from "./_routes/tasks.js";
 import sms from "./_routes/sms.js";
+import smsGroup from "./_routes/smsgroup.js";
 import authRequest from "./_routes/auth/request.js";
 import authVerify from "./_routes/auth/verify.js";
 import authSession from "./_routes/auth/session.js";
@@ -34,6 +35,7 @@ import vault from "./_routes/vault.js";
 import push from "./_routes/push.js";
 import gmail from "./_routes/gmail.js";
 import workcal from "./_routes/workcal.js";
+import schedules from "./_routes/schedules.js";
 
 type Handler = (req: VercelRequest, res: VercelResponse) => Promise<unknown> | unknown;
 
@@ -56,6 +58,8 @@ const ROUTES: Record<string, Handler> = {
   push,
   gmail,
   workcal,
+  schedules,
+  "sms/group": smsGroup,
   "auth/request": authRequest,
   "auth/verify": authVerify,
   "auth/session": authSession,

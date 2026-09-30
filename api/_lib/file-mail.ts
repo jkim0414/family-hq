@@ -42,9 +42,10 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   const stats: FileStats = { filed: 0, events: 0, updatedEvents: 0, todos: 0, alerts: 0, duplicates: 0, metaApplied: 0, metaSuggested: 0, processedKeys: [] };
   if (!messages.length) return stats;
 
-  const existingEvents = await getCollection("events");
+  // Private items (a parent's Just-me chat) are never matched, shown to the classifier, or updated by filing.
+  const existingEvents = (await getCollection("events")).filter((e) => !e.privateTo);
   const existingComms = await getCollection("comms");
-  const existingTodos = await getCollection("todos");
+  const existingTodos = (await getCollection("todos")).filter((t) => !t.privateTo);
   const profileCtx = profileContext(await getProfile());
   const newComms: Comm[] = [];
   const newEvents: CalEvent[] = [];

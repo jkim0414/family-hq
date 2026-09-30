@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { Todo } from "../data/types";
 import { dateLabel, daysUntil, fmtDate, isTodoUrgent, SOURCE_LABEL } from "../store";
-import { WhoChips, Button, EditButton } from "./ui";
+import { WhoChips, Button, EditButton, PrivateTag } from "./ui";
 import { peopleOf, ownerOf } from "../data/people";
 
 // One to-do row. The checkbox completes it; tapping the text expands it
@@ -45,6 +45,7 @@ export function TodoItem({
                 </span>
               )}
               {todo.title}
+              {todo.privateTo && <PrivateTag className="ml-1.5" />}
             </div>
             {todo.detail && !done && !open && <div className="mt-0.5 line-clamp-1 break-words text-[13px] text-ink-3">{todo.detail}</div>}
             {who && !open && (

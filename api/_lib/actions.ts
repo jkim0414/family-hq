@@ -34,6 +34,8 @@ export async function proposeAction(input: {
   taskId?: string;
   requestedBy: Action["requestedBy"];
   channel: Channel;
+  /** Private to one parent (proposed from their "Just me" thread). */
+  privateTo?: "alex" | "sam";
 }): Promise<Action> {
   const action: Action = {
     id: `act-${Date.now().toString(36)}-${randomBytes(2).toString("hex")}`,
@@ -44,13 +46,14 @@ export async function proposeAction(input: {
   const actions = await getCollection("actions");
   actions.push(action);
   await setCollection("actions", actions.slice(-200));
-  await addAudit({ kind: "proposed", summary: `${action.title} — awaiting approval`, by: "agent", ref: action.id });
+  await addAudit({ kind: "proposed", summary: `${action.title} — awaiting approval`, by: "agent", ref: action.id, privateTo: action.privateTo });
   return action;
 }
 
-export async function latestPending(): Promise<Action | null> {
+/** The newest approval waiting on this parent (shared ones, or their own private ones). */
+export async function latestPending(who?: "alex" | "sam"): Promise<Action | null> {
   const actions = await getCollection("actions");
-  return [...actions].reverse().find((a) => a.status === "proposed") || null;
+  return [...actions].reverse().find((a) => a.status === "proposed" && (!who || !a.privateTo || a.privateTo === who)) || null;
 }
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -85,12 +88,13 @@ export async function decideAction(id: string, decision: "approve" | "decline", 
   const a = actions.find((x) => x.id === id);
   if (!a) throw new Error("action not found");
   if (a.status !== "proposed") throw new Error(`action already ${a.status}`);
+  if (a.privateTo && a.privateTo !== by) throw new Error("action not found"); // someone else's private approval
   a.decidedAt = new Date().toISOString();
   a.decidedBy = by;
   if (decision === "decline") {
     a.status = "declined";
     await setCollection("actions", actions);
-    await addAudit({ kind: "declined", summary: a.title, by, ref: a.id });
+    await addAudit({ kind: "declined", summary: a.title, by, ref: a.id, privateTo: a.privateTo });
     if (a.kind === "confirm_step") {
       const p = a.payload as StepPayload;
       await pokeTask(p.taskId, `Approval DECLINED by ${by} for: ${p.description}\nDo NOT perform it. Wrap up: report what was done so far and what's pending.`, false);
@@ -102,12 +106,12 @@ export async function decideAction(id: string, decision: "approve" | "decline", 
     a.status = "executed";
     a.executedAt = new Date().toISOString();
     await setCollection("actions", actions);
-    await addAudit({ kind: "executed", summary: `${a.title} — ${a.result}`, by, ref: a.id });
+    await addAudit({ kind: "executed", summary: `${a.title} — ${a.result}`, by, ref: a.id, privateTo: a.privateTo });
   } catch (e) {
     a.status = "failed";
     a.error = String(e);
     await setCollection("actions", actions);
-    await addAudit({ kind: "failed", summary: `${a.title} — ${a.error}`, by, ref: a.id });
+    await addAudit({ kind: "failed", summary: `${a.title} — ${a.error}`, by, ref: a.id, privateTo: a.privateTo });
   }
   return a;
 }

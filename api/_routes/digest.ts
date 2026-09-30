@@ -47,9 +47,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const dryRun = req.query.dry === "1";
 
   try {
+    // The digest goes to both parents, so private items never appear in it.
     const [allEvents, allTodos] = await Promise.all([
-      getCollection("events"),
-      getCollection("todos"),
+      getCollection("events").then((xs) => xs.filter((x) => !x.privateTo)),
+      getCollection("todos").then((xs) => xs.filter((x) => !x.privateTo)),
     ]);
     const today = todayPT();
     await ensureSeasonalSuggestions(new Date().toISOString()).catch(() => {});

@@ -131,6 +131,45 @@ export interface CalEvent {
   travelMin?: number;
   /** The location string travelMin was computed for — recomputed when the location changes. */
   travelFor?: string;
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
+}
+
+/**
+ * How a scheduled task repeats. Dates are evaluated in the home time zone.
+ * weekly: `weekdays` (0 = Sunday … 6 = Saturday; default: the first run's weekday).
+ * monthly: `monthDay` (1–31, clamped to short months; -1 = the last day) OR `nth` (e.g. {n: 1, weekday: 2} = first Tuesday; n = -1 for the last).
+ * yearly: the first run's month and day.
+ */
+export interface Repeat {
+  freq: "daily" | "weekly" | "monthly" | "yearly";
+  interval?: number; // every N days/weeks/months/years (default 1)
+  weekdays?: number[];
+  monthDay?: number;
+  nth?: { n: number; weekday: number };
+  until?: string; // YYYY-MM-DD, inclusive
+}
+
+/** Something Kimi does at a set time — once, or on a repeat. */
+export interface Schedule {
+  id: string;
+  title: string; // short label, e.g. "Monthly spending recap"
+  instruction: string; // what Kimi should do when it fires
+  owner: "alex" | "sam"; // who asked — they get the result
+  notify: "owner" | "both";
+  channel: Channel; // where the asker was when they set it up
+  /** The chat thread it runs in and reports to (default: the family chat). */
+  thread?: string;
+  time: string; // HH:mm, home time
+  anchor: string; // YYYY-MM-DD of the first run (repeat intervals count from here)
+  repeat?: Repeat; // absent = one-time
+  nextRunAt?: string; // ISO; absent when finished
+  active: boolean;
+  createdAt: string;
+  lastRunAt?: string;
+  runs?: number;
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
 }
 
 /** One purchase, from a receipt in a parent's inbox (or a checkout Kimi completed). */
@@ -150,6 +189,8 @@ export interface Purchase {
   /** The receipt message it came from (account:uidValidity:uid), for de-duplication. */
   sourceKey?: string;
   createdAt: string;
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
 }
 
 // A structured change to family metadata (kid info, directory, routines).
@@ -205,6 +246,8 @@ export interface Todo {
   done: boolean;
   source?: Source;
   commId?: string;
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
 }
 
 // ── Agent tasks ──────────────────────────────────────────────────────────────
@@ -212,7 +255,8 @@ export interface Todo {
 // family chat ("task-main") plus any long-running jobs it spawns. The raw model
 // thread is opaque to the client; `log` is the human-readable transcript.
 export type TaskStatus = "open" | "running" | "waiting" | "blocked" | "done" | "failed" | "cancelled";
-export type Channel = "app" | "sms";
+/** Where a message came from / where replies go: the app, a one-on-one text, or the family group text. */
+export type Channel = "app" | "sms" | "group";
 
 export interface TaskLogEntry {
   at: string; // ISO
@@ -256,6 +300,8 @@ export interface Action {
   taskId?: string;
   requestedBy: "alex" | "sam" | "agent";
   channel: Channel;
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
 }
 
 export interface AuditEntry {
@@ -265,6 +311,8 @@ export interface AuditEntry {
   summary: string;
   by?: string;
   ref?: string; // action/file id
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
 }
 
 // A rendered page the assistant produced (a comparison, a plan, an itinerary).
@@ -278,6 +326,8 @@ export interface FileDoc {
   public: boolean;
   shareToken?: string;
   taskId?: string;
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
 }
 
 export interface Task {
@@ -293,6 +343,10 @@ export interface Task {
   parentRequest?: string;
   /** Why the safety check last blocked a step — shown to the parent with the next approval request. */
   guardNote?: string;
+  /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
+  privateTo?: "alex" | "sam";
+  /** For a background task: the chat thread that started it (results are posted back there). */
+  parentThread?: string;
   channel: Channel; // where the last message came from (and where replies go)
   owner: "alex" | "sam"; // who to notify with proactive replies
   createdAt: string;

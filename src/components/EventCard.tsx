@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { dateLabel, displayDate, eventTimeRange, fmtDate, SOURCE_LABEL } from "../store";
 import { htmlToText } from "../data/text";
-import { Card, WhoChips, Button, EditButton } from "./ui";
+import { Card, WhoChips, Button, EditButton, PrivateTag } from "./ui";
 import { peopleOf, ownerOf } from "../data/people";
 import { toHomeZone, fmt12 } from "../data/tz";
 import type { CalEvent } from "../data/types";
@@ -30,7 +30,7 @@ export function EventCard({ e, onEdit, showDate = true }: { e: CalEvent; onEdit?
     <Card className="overflow-hidden">
       <div className="flex items-start">
         <button type="button" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="min-w-0 flex-1 py-3 pl-4 pr-1 text-left">
-          <div className="break-words text-[15px] font-semibold leading-snug text-ink">{e.title}</div>
+          <div className="break-words text-[15px] font-semibold leading-snug text-ink">{e.title}{e.privateTo && <PrivateTag className="ml-1.5" />}</div>
           <div className="mt-0.5 flex min-w-0 items-baseline gap-1.5 text-[13px] text-ink-3">
             {showDate && <span className="shrink-0 font-semibold text-accent">{dateLabel(displayDate(e))}</span>}
             {timeStr && <span className="shrink-0">{timeStr}</span>}

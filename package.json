@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.api.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc -p tsconfig.api.json && node scripts/check-esm-imports.mjs"
   },
   "dependencies": {
     "@1password/sdk": "^0.5.0",

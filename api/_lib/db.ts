@@ -4,7 +4,7 @@
 
 import { Redis } from "@upstash/redis";
 import { randomBytes } from "node:crypto";
-import type { Kid, Contact, Place, Routine, Comm, CalEvent, Todo, Suggestion, HouseholdProfile, Task, Action, AuditEntry, FileDoc, Purchase } from "../../src/data/types";
+import type { Kid, Contact, Place, Routine, Comm, CalEvent, Todo, Suggestion, HouseholdProfile, Task, Action, AuditEntry, FileDoc, Purchase, Schedule } from "../../src/data/types";
 
 // Accept either the Upstash-native or Vercel-KV env var names.
 export const redis = new Redis({
@@ -24,6 +24,7 @@ export interface AppState {
   actions: Action[];
   audit: AuditEntry[];
   spending: Purchase[];
+  schedules: Schedule[];
 }
 
 type Collection = keyof AppState;
@@ -39,6 +40,7 @@ const COLLECTIONS: Collection[] = [
   "actions",
   "audit",
   "spending",
+  "schedules",
 ];
 
 export async function getCollection<K extends Collection>(

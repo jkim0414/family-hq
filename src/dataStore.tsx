@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { KIDS } from "./data/kids";
 import { CONTACTS, PLACES, ROUTINES } from "./data/meta";
-import type { Comm, Contact, CalEvent, Kid, Place, Routine, Todo, Suggestion, HouseholdProfile, Action, AuditEntry, Purchase } from "./data/types";
+import type { Comm, Contact, CalEvent, Kid, Place, Routine, Todo, Suggestion, HouseholdProfile, Action, AuditEntry, Purchase, Schedule } from "./data/types";
 
 export interface AppState {
   kids: Kid[];
@@ -15,6 +15,7 @@ export interface AppState {
   actions: Action[];
   audit: AuditEntry[];
   spending: Purchase[];
+  schedules: Schedule[];
   profile: HouseholdProfile;
 }
 
@@ -32,6 +33,7 @@ const INITIAL: AppState = {
   actions: [],
   audit: [],
   spending: [],
+  schedules: [],
   profile: { sections: [], people: [] },
 };
 

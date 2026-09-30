@@ -21,17 +21,21 @@ function genId(prefix: string) {
 // POST /api/mutate  { op: "upsert"|"delete", collection, item?, id? }
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") return json(res, 405, { error: "POST only" });
-  if (!(await requireUser(req))) return json(res, 401, { error: "unauthorized" });
+  const user = await requireUser(req);
+  if (!user) return json(res, 401, { error: "unauthorized" });
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const { op, collection } = body || {};
     if (!EDITABLE.includes(collection)) return json(res, 400, { error: "bad collection" });
 
     const list = (await getCollection(collection)) as any[];
+    // A parent can only touch shared items and their own private ones.
+    const mine = (x: any) => !x?.privateTo || x.privateTo === user.id;
 
     if (op === "delete") {
       const id = body.id;
       const target = list.find((x) => x.id === id);
+      if (target && !mine(target)) return json(res, 404, { error: "not found" });
       if (collection === "events" && target?.gcalId) {
         await deleteCalendarEvent(target.gcalId).catch(() => {});
       }
@@ -42,9 +46,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (op === "upsert") {
       const item = { ...body.item };
       if (!item.id) item.id = genId(collection.slice(0, 4));
+      const prior = list.find((x) => x.id === item.id);
+      if (prior && !mine(prior)) return json(res, 404, { error: "not found" });
+      if (item.privateTo && item.privateTo !== user.id) return json(res, 400, { error: "can only make items private to yourself" });
+      if (prior?.privateTo) item.privateTo = prior.privateTo; // stays private
 
-      // Events: sync to Google Calendar and capture the gcal id.
-      if (collection === "events") {
+      // Events: sync to Google Calendar and capture the gcal id — never for private events.
+      if (collection === "events" && !item.privateTo) {
         try {
           const gcalId = await updateCalendarEvent(item as CalEvent);
           if (gcalId) item.gcalId = gcalId;

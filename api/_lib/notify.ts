@@ -4,6 +4,7 @@ import { userById } from "./auth.js";
 import { pushConfigured, sendPush } from "./push.js";
 import { redis } from "./db.js";
 import type { Channel } from "../../src/data/types";
+import { sendGroup } from "./groupsms.js";
 
 // Outbound delivery for the assistant's proactive messages: SMS via Twilio when
 // the conversation is on SMS; otherwise a push notification to the parent's
@@ -45,7 +46,9 @@ export async function setSmsOptIn(id: "alex" | "sam", state: SmsOptIn): Promise<
 }
 
 export const SMS_BRAND = "Kimi (Family HQ)";
+/** Kimi's contact card (name, number, and her app avatar) — saving it shows her photo on texts. */
 const HQ_URL = process.env.APP_URL || "https://your-app.vercel.app";
+export const CONTACT_CARD_URL = `${HQ_URL}/kimi.vcf`;
 
 /**
  * Every outgoing text: brand prefix (so the sender is clear, as registered), plain text
@@ -57,6 +60,7 @@ export function smsBody(raw: string): string {
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/^#+\s*/gm, "")
+    .replace(/<\/?(strong|b|em|i|u|br|p|span)\b[^>]*>/gi, "")
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, "$1 $2")
     ;
   t = t.replace(/\bhttps?:\/\/[^\s<>()]+|\bwww\.[^\s<>()]+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|us|io|co|edu|gov|ly|me|app)\/[^\s<>()]*/gi, (url) =>
@@ -67,7 +71,7 @@ export function smsBody(raw: string): string {
 }
 
 /** Send one SMS through Twilio's REST API (no SDK — one form POST). */
-export async function sendSms(to: string, rawBody: string): Promise<void> {
+export async function sendSms(to: string, rawBody: string, mediaUrl?: string): Promise<void> {
   if (!smsConfigured()) throw new Error("Twilio not configured");
   const body = smsBody(rawBody);
   const sid = process.env.TWILIO_ACCOUNT_SID!;
@@ -75,6 +79,7 @@ export async function sendSms(to: string, rawBody: string): Promise<void> {
   // A2P 10DLC: sending via the registered campaign's Messaging Service is the
   // carrier-preferred path; fall back to a bare From number if that's all we have.
   const form = new URLSearchParams({ To: to, Body: body.slice(0, 1500) });
+  if (mediaUrl) form.set("MediaUrl", mediaUrl); // sent as MMS (e.g. Kimi's contact card)
   if (process.env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", process.env.TWILIO_MESSAGING_SERVICE_SID);
   else form.set("From", process.env.TWILIO_FROM!);
   const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
@@ -89,6 +94,11 @@ export async function sendSms(to: string, rawBody: string): Promise<void> {
 export async function notify(userId: "alex" | "sam", text: string, channel: Channel, opts: { emailFallback?: boolean } = {}): Promise<void> {
   const u = userById(userId);
   if (!u) return;
+  // The family group text reaches both parents at once; without one, fall back to a one-on-one text.
+  if (channel === "group") {
+    if (await sendGroup(text).catch((e) => (console.error("group send failed", e), false))) return;
+    channel = "sms";
+  }
   // Text only a parent who has completed opt-in (START, then Y); otherwise push/email.
   if (channel === "sms" && smsConfigured() && (await getSmsOptIn(userId)) === "enrolled") {
     await sendSms(phoneFor(userId), text);
@@ -110,4 +120,10 @@ export async function notify(userId: "alex" | "sam", text: string, channel: Chan
     to: [u.email],
     text,
   });
+}
+
+/** Deliver one message to several parents: once to the group text when that's the channel, else to each. */
+export async function deliver(to: ("alex" | "sam")[], text: string, channel: Channel): Promise<void> {
+  if (channel === "group" && (await sendGroup(text).catch(() => false))) return;
+  for (const p of to) await notify(p, text, channel === "group" ? "sms" : channel).catch((e) => console.error("notify failed", e));
 }

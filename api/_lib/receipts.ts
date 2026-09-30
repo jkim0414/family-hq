@@ -86,17 +86,18 @@ export function samePurchase(a: { merchant: string; amount: number; date: string
   return Math.abs(a.amount - b.amount) <= Math.max(0.01, tolerance);
 }
 
-/** Did Kimi complete a checkout at this merchant in the few days before the receipt? */
-async function kimiMade(merchant: string, from: string, date: string): Promise<boolean> {
+/** Did Kimi complete a checkout at this merchant in the few days before the receipt? (and was it a private one?) */
+async function kimiMade(merchant: string, from: string, date: string): Promise<{ privateTo?: "alex" | "sam" } | null> {
   const keys = await redis.keys("kimi_purchase:*").catch(() => [] as string[]);
-  if (!keys.length) return false;
-  const marks = (await redis.mget<({ host: string; at: string } | null)[]>(...keys).catch(() => [])) || [];
+  if (!keys.length) return null;
+  const marks = (await redis.mget<({ host: string; at: string; privateTo?: "alex" | "sam" } | null)[]>(...keys).catch(() => [])) || [];
   const hay = norm(`${merchant} ${from}`);
-  return marks.some((k) => {
+  const hit = marks.find((k) => {
     if (!k?.host) return false;
     const base = norm(k.host.split(".").slice(-2, -1)[0] || k.host);
     return base.length >= 3 && hay.includes(base) && dayDiff(k.at, date) <= 3;
   });
+  return hit ? { privateTo: hit.privateTo } : null;
 }
 
 /**
@@ -150,7 +151,10 @@ export async function extractPurchases(account: "alex" | "sam", msgs: RecentMess
       orderNumber: x.orderNumber?.slice(0, 40) || undefined,
       cardLast4: /^\d{4}$/.test(x.cardLast4 || "") ? x.cardLast4 : undefined,
       account,
-      byKimi: (await kimiMade(x.merchant, m.from, date)) || undefined,
+      ...(await (async () => {
+        const made = await kimiMade(x.merchant!, m.from, date);
+        return made ? { byKimi: true, ...(made.privateTo ? { privateTo: made.privateTo } : {}) } : {};
+      })()),
       source: "email",
       sourceKey: keyOf(m),
       createdAt: new Date().toISOString(),

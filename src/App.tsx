@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { useData } from "./dataStore";
 import Home from "./views/Home";
-import Chat, { CHAT_SEEN_KEY } from "./views/Chat";
+import Chat, { CHAT_SEEN_KEY, CHAT_SEEN_PRIVATE_KEY } from "./views/Chat";
 import Agenda from "./views/Agenda";
 import Household from "./views/Household";
 import Assistant from "./views/Assistant";
@@ -30,11 +30,14 @@ function useChatUnread(active: boolean): number {
     const check = async () => {
       if (document.visibilityState !== "visible") return;
       try {
-        const seen = localStorage.getItem(CHAT_SEEN_KEY) || "1970-01-01";
-        const r = await fetch(`/api/tasks?id=task-main&after=${encodeURIComponent(seen)}`, { cache: "no-store" });
-        if (!r.ok) return;
-        const j = await r.json();
-        if (!stop) setN(Number(j.unread) || 0);
+        // New replies in the family chat plus this parent's private "Just me" thread.
+        const count = async (id: string, key: string) => {
+          const seen = localStorage.getItem(key) || "1970-01-01";
+          const r = await fetch(`/api/tasks?id=${id}&after=${encodeURIComponent(seen)}`, { cache: "no-store" });
+          return r.ok ? Number((await r.json()).unread) || 0 : 0;
+        };
+        const [fam, mine] = await Promise.all([count("task-main", CHAT_SEEN_KEY), count("private", CHAT_SEEN_PRIVATE_KEY)]);
+        if (!stop) setN(fam + mine);
       } catch {
         /* offline */
       }

@@ -153,7 +153,7 @@ export async function checkLeaveAlerts(): Promise<number> {
     if (until > 15 || until < 4) continue;
     if (!(await redis.set(`leave_alert:${e.id}:${today}`, "1", { nx: true, ex: 2 * 86400 }).catch(() => null))) continue;
     const owners = ownerOf(e).filter((o): o is "alex" | "sam" => o === "alex" || o === "sam");
-    const to: ("alex" | "sam")[] = owners.length ? owners : ["alex", "sam"];
+    const to: ("alex" | "sam")[] = e.privateTo ? [e.privateTo] : owners.length ? owners : ["alex", "sam"];
     const text = `🚗 Leave by ${fmt12(leave)} for ${e.title} (about ${e.travelMin} min drive${e.location ? ` to ${e.location}` : ""}).`;
     for (const p of to) await notify(p, text, "app", { emailFallback: false }).catch((err) => console.error("leave alert failed", err));
     sent++;

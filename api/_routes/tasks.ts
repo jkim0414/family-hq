@@ -3,6 +3,7 @@ import { json } from "../_lib/http.js";
 import { requireUser } from "../_lib/auth.js";
 import { getTaskMeta, getTaskMetas, listTaskIds } from "../_lib/db.js";
 import { stopTask } from "../_lib/agent.js";
+import { canSee, privateThreadId } from "../_lib/privacy.js";
 
 // GET  /api/tasks           → light list of tasks
 // POST /api/tasks {id, stop} → stop a background task now
@@ -14,16 +15,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (req.method === "POST") {
       const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
       if (body.stop && body.id) {
+        if (!canSee(await getTaskMeta(String(body.id)), user.id)) return json(res, 404, { error: "not a browser task" });
         const t = await stopTask(String(body.id), user.id);
         return t ? json(res, 200, { ok: true, status: t.status }) : json(res, 404, { error: "not a browser task" });
       }
       return json(res, 400, { error: "unknown action" });
     }
     res.setHeader("cache-control", "no-store");
-    const id = typeof req.query.id === "string" ? req.query.id : "";
+    // "private" = the signed-in parent's own "Just me" thread with Kimi.
+    const rawId = typeof req.query.id === "string" ? req.query.id : "";
+    const id = rawId === "private" ? privateThreadId(user.id) : rawId;
     if (id) {
       const t = await getTaskMeta(id);
-      if (!t) return json(res, 200, { task: null });
+      if (!t || !canSee(t, user.id)) return json(res, 200, { task: null });
       // ?after=<iso> → just the count of assistant replies since then (the unread badge).
       if (typeof req.query.after === "string") {
         const after = req.query.after;
@@ -31,7 +35,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
       return json(res, 200, { task: t });
     }
-    const metas = await getTaskMetas(await listTaskIds());
+    const metas = (await getTaskMetas(await listTaskIds())).filter((t) => canSee(t, user.id));
     const tasks = metas.map((t) => ({
       id: t.id,
       title: t.title,
@@ -42,6 +46,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       nextCheckAt: t.nextCheckAt,
       followupNote: t.followupNote,
       lastReply: t.lastReply,
+      privateTo: t.privateTo,
     }));
     json(res, 200, { tasks });
   } catch (err) {

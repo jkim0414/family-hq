@@ -12,6 +12,10 @@ import type { TaskLogEntry, TaskStatus, Action, EmailPayload, StepPayload } from
 // background tasks with their status, files it wrote.
 
 export const CHAT_SEEN_KEY = "fhq:chatSeen";
+/** Last time this device opened the private "Just me" thread (for the unread badge). */
+export const CHAT_SEEN_PRIVATE_KEY = "fhq:chatSeenPrivate";
+type Thread = "family" | "private";
+const THREAD_KEY = "fhq:chatThread";
 
 interface TaskRow {
   id: string;
@@ -20,12 +24,14 @@ interface TaskRow {
   kind?: string;
   updatedAt: string;
   lastReply?: string;
+  privateTo?: string;
 }
 interface FileRow {
   id: string;
   title: string;
   createdAt: string;
   url: string;
+  privateTo?: string;
 }
 
 type Row =
@@ -52,10 +58,36 @@ const EXAMPLES = ["What's on this weekend?", "Move the dentist to Tuesday 3pm", 
 
 // The last thread this session showed, so reopening the tab paints it immediately
 // (already at the bottom) instead of blank → oldest-first → jump.
-let cached: { log: TaskLogEntry[]; status: TaskStatus | null; tasks: TaskRow[]; files: FileRow[]; sig: string } | null = null;
+type ChatCache = { log: TaskLogEntry[]; status: TaskStatus | null; tasks: TaskRow[]; files: FileRow[]; sig: string };
+const cacheByThread: Record<Thread, ChatCache | null> = { family: null, private: null };
 
+// Two conversations with Kimi: the shared family chat, and each parent's private "Just me"
+// thread (also where their one-on-one texts land). The choice is remembered on this device.
 export default function Chat() {
+  const [thread, setThread] = useState<Thread>(() => {
+    try {
+      return localStorage.getItem(THREAD_KEY) === "private" ? "private" : "family";
+    } catch {
+      return "family";
+    }
+  });
+  const choose = (t: Thread) => {
+    setThread(t);
+    try {
+      localStorage.setItem(THREAD_KEY, t);
+    } catch {
+      /* ignore */
+    }
+  };
+  return <ChatThread key={thread} thread={thread} onThread={choose} />;
+}
+
+function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread) => void }) {
   const { data, decideAction } = useData();
+  const cached = cacheByThread[thread];
+  const isPrivate = thread === "private";
+  // Cards shown in a thread belong to it: shared ones in Family, your private ones in Just me.
+  const inThread = (x: { privateTo?: string }) => (isPrivate ? !!x.privateTo : !x.privateTo);
   const [log, setLog] = useState<TaskLogEntry[]>(cached?.log ?? []);
   const [status, setStatus] = useState<TaskStatus | null>(cached?.status ?? null);
   const [tasks, setTasks] = useState<TaskRow[]>(cached?.tasks ?? []);
@@ -86,20 +118,24 @@ export default function Chat() {
     if (!t) return;
     const list: (TaskRow & { updatedAt: string })[] = t.tasks || [];
     const next = list.map((x) => `${x.id}:${x.updatedAt}:${x.status}`).sort().join("|");
-    const browserTasks = list.filter((x) => x.kind === "browser");
+    const browserTasks = list.filter((x) => x.kind === "browser" && inThread(x));
     setTasks(browserTasks);
-    if (cached) cached.tasks = browserTasks;
+    if (cacheByThread[thread]) cacheByThread[thread]!.tasks = browserTasks;
     if (!force && next === sig.current) return;
-    const [m, f] = await Promise.all([get("/api/tasks?id=task-main"), get("/api/files")]);
-    if (!m?.task) return;
+    const [m, f] = await Promise.all([get(`/api/tasks?id=${isPrivate ? "private" : "task-main"}`), get("/api/files")]);
+    if (!m) return;
+    // A private thread doesn't exist until its first message: show it empty, not loading.
+    const tlog: TaskLogEntry[] = m.task?.log || [];
+    const tstatus: TaskStatus | null = m.task?.status ?? null;
+    const tfiles: FileRow[] = f ? (f.files || []).filter(inThread) : cacheByThread[thread]?.files || [];
     sig.current = next;
-    setLog(m.task.log || []);
-    setStatus(m.task.status);
-    if (f) setFiles(f.files || []);
+    setLog(tlog);
+    setStatus(tstatus);
+    setFiles(tfiles);
     setLoaded(true);
-    cached = { log: m.task.log || [], status: m.task.status, tasks: browserTasks, files: f?.files || cached?.files || [], sig: next };
+    cacheByThread[thread] = { log: tlog, status: tstatus, tasks: browserTasks, files: tfiles, sig: next };
     try {
-      localStorage.setItem(CHAT_SEEN_KEY, new Date().toISOString());
+      localStorage.setItem(isPrivate ? CHAT_SEEN_PRIVATE_KEY : CHAT_SEEN_KEY, new Date().toISOString());
     } catch {
       /* ignore */
     }
@@ -151,7 +187,7 @@ export default function Chat() {
       const r = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message, attachments: sending.map(({ mediaType, data }) => ({ mediaType, data })) }),
+        body: JSON.stringify({ message, thread, attachments: sending.map(({ mediaType, data }) => ({ mediaType, data })) }),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -159,7 +195,7 @@ export default function Chat() {
       } else if (j.log) {
         setLog(j.log);
         setStatus(j.status);
-        if (cached) cached = { ...cached, log: j.log, status: j.status };
+        if (cacheByThread[thread]) cacheByThread[thread] = { ...cacheByThread[thread]!, log: j.log, status: j.status };
         if (j.pending) setNote({ text: "Still working on it — you'll get a notification when it's done.", kind: "info" });
         load(true);
       }
@@ -181,7 +217,7 @@ export default function Chat() {
       else rows.push({ at: e.at, kind: "tools", entries: [e] });
     } else rows.push({ at: e.at, kind: "msg", entry: e });
   }
-  for (const a of data.actions || []) rows.push({ at: a.createdAt, kind: "action", a });
+  for (const a of (data.actions || []).filter(inThread)) rows.push({ at: a.createdAt, kind: "action", a });
   for (const t of tasks) rows.push({ at: t.updatedAt, kind: "task", t });
   for (const f of files) rows.push({ at: f.createdAt, kind: "file", f });
   rows.sort((x, y) => x.at.localeCompare(y.at));
@@ -192,12 +228,26 @@ export default function Chat() {
   return (
     <div className="flex h-full flex-col md:h-[calc(100vh-5rem)]">
       <div className="mb-2 flex items-center justify-between">
-<div className="flex items-center gap-2.5">
+<div className="flex min-w-0 items-center gap-2.5">
           <KimiAvatar size={36} />
           <div>
             <h1 className="text-[22px] font-bold leading-tight text-ink">Kimi</h1>
-            <div className="text-[12px] text-ink-3">Your family's assistant</div>
+            <div className="truncate text-[12px] text-ink-3">{isPrivate ? "Only you can see this" : "Your family's assistant"}</div>
           </div>
+        </div>
+        <div className="flex shrink-0 rounded-full bg-fill p-0.5 text-[12px] font-semibold" role="tablist" aria-label="Conversation">
+          {(["family", "private"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              role="tab"
+              aria-selected={thread === t}
+              onClick={() => thread !== t && onThread(t)}
+              className={`min-h-[30px] whitespace-nowrap rounded-full px-3 ${thread === t ? "bg-surface text-ink shadow-sm" : "text-ink-3"}`}
+            >
+              {t === "family" ? "Family" : "🔒 Just me"}
+            </button>
+          ))}
         </div>
         {status === "waiting" && <span className="rounded-full bg-warn-soft px-2 py-0.5 text-[11px] font-semibold text-warn">Follow-up scheduled</span>}
         {status === "running" && !busy && <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-semibold text-accent">Working…</span>}
@@ -208,7 +258,11 @@ export default function Chat() {
       <div className="space-y-2 pb-3">
         {loaded && rows.length === 0 && (
           <div className="rounded-2xl bg-surface p-4 shadow-sm ring-1 ring-line">
-            <div className="text-sm text-ink-2">Hi, I'm Kimi! Ask me about the schedule, hand me a task, or send a photo or PDF and I'll file it.</div>
+            <div className="text-sm text-ink-2">
+              {isPrivate
+                ? "Just you and me here — the other parent can't see this chat, and your one-on-one texts with me land here too. Ask me to keep something private (a surprise, a gift idea) and it stays off the family calendar and chat."
+                : "Hi, I'm Kimi! Ask me about the schedule, hand me a task, or send a photo or PDF and I'll file it."}
+            </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
               {EXAMPLES.map((ex) => (
                 <button key={ex} onClick={() => send(ex)} className="rounded-full bg-fill px-3 py-1.5 text-xs font-medium text-ink-2 active:bg-fill">

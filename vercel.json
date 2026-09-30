@@ -28,5 +28,20 @@
     "api/router.ts": {
       "maxDuration": 300
     }
-  }
+  },
+  "headers": [
+    {
+      "source": "/kimi.vcf",
+      "headers": [
+        {
+          "key": "Content-Type",
+          "value": "text/vcard; charset=utf-8"
+        },
+        {
+          "key": "Content-Disposition",
+          "value": "inline; filename=\"Kimi.vcf\""
+        }
+      ]
+    }
+  ]
 }

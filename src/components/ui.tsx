@@ -258,3 +258,12 @@ export function EditButton({ onClick, label, className = "" }: { onClick: () => 
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="rounded-2xl border border-dashed border-line px-5 py-6 text-center text-[15px] text-ink-3">{children}</div>;
 }
+
+/** "Only you" marker for items private to the signed-in parent (made in their Just me chat). */
+export function PrivateTag({ className = "" }: { className?: string }) {
+  return (
+    <span className={`inline-flex items-center gap-0.5 rounded-md bg-fill px-1.5 py-0.5 align-middle text-[10px] font-semibold text-ink-3 ${className}`} title="Private — only you can see this">
+      🔒 Only you
+    </span>
+  );
+}

@@ -16,7 +16,7 @@ import {
 } from "./db.js";
 import { profileContext } from "./classify.js";
 import { createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "./calendar.js";
-import { notify } from "./notify.js";
+import { notify, deliver } from "./notify.js";
 import { proposeAction } from "./actions.js";
 import { createFile, fileUrl } from "./files.js";
 import { searchMail, inboxConfigured } from "./imap.js";
@@ -27,9 +27,12 @@ import { getWorkCalConfig, getWorkBlocks, formatBlocks } from "./workcal.js";
 import { listCredentials, getCredentialField, credentialsAvailable } from "./vault.js";
 import { listOpCards, getOpCard, opConfigured, BUSINESS_CARD_RE } from "./onepassword.js";
 import { guardCheck, pageFacts } from "./guard.js";
+import { canSee, threadOwner, getPrivateNotes, addPrivateNote, type Viewer } from "./privacy.js";
 import { summarizeSpending } from "./receipts.js";
 import { dayOutlook, windowWeather } from "./weather.js";
 import { leaveByTime } from "./travel.js";
+import { createSchedule, listSchedules, cancelSchedule, claimDue, dueThreads, describe as describeSchedule, fmtSchedule, weekdayIndex } from "./schedules.js";
+import type { Repeat } from "../../src/data/types";
 import { toHomeZone, homeSortKey, wallToUtc, HOME_TZ, fmt12 } from "../../src/data/tz.js";
 import { CONFIG } from "../../src/data/config.js";
 import { shortTitle } from "../../src/data/text.js";
@@ -116,6 +119,7 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
         notes: { type: "string", description: "What to bring/wear, confirmation numbers, details" },
         people: { type: "array", items: { type: "string" }, description: 'Who it is FOR: "max","theo","ava","alex","sam" or a guest name' },
         owner: { type: "array", items: { type: "string" }, description: 'Who is RESPONSIBLE: "alex" and/or "sam"' },
+        private: { type: "boolean", description: "Only in a private (Just me) chat: keep this event visible to this parent only — not on the shared Google Calendar, not in the family chat or digests." },
       },
       required: ["title", "date"],
     },
@@ -167,6 +171,7 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
         people: { type: "array", items: { type: "string" } },
         owner: { type: "array", items: { type: "string" } },
         priority: { type: "string", enum: ["normal", "high"] },
+        private: { type: "boolean", description: "Only in a private (Just me) chat: keep this to-do visible to this parent only." },
       },
       required: ["title"],
     },
@@ -185,14 +190,55 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
       "Save a durable household fact to the family's profile so future conversations know it (a preference, an allergy update, a standing arrangement, a vendor, a rule). Call this whenever a parent tells you something worth remembering long-term — not for one-off events.",
     input_schema: {
       type: "object",
-      properties: { fact: { type: "string", description: "One clear sentence." } },
+      properties: {
+        fact: { type: "string", description: "One clear sentence." },
+        private: { type: "boolean", description: "Only in a private (Just me) chat: save it as this parent's private note (e.g. a gift idea) instead of a household fact both parents see." },
+      },
       required: ["fact"],
     },
   },
   {
-    name: "schedule_followup",
+    name: "schedule_task",
     description:
-      "Schedule yourself to check back in later — call this whenever you promise to follow up, remind someone at a time, or re-check something. At that time you'll be woken with the note and are expected to act and message the family.",
+      "Schedule something for yourself to do later — once (\"check on the RSVP next Tuesday\", \"remind me Thursday at 5\") or on a repeat (\"every last day of the month, recap our spending\", \"every other Friday\", \"first Tuesday of each month\"). When it's due you'll be woken with the instruction, do the work (look things up, file things), and your reply goes to whoever asked (or both parents). Any number can be pending. Confirm back in plain words what you set up (the result tells you the exact cadence and first run).",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Short label, e.g. 'Monthly spending recap'" },
+        instruction: { type: "string", description: "Exactly what to do each time, self-contained (you won't remember this conversation)." },
+        date: { type: "string", description: "First run date YYYY-MM-DD (Pacific). For repeats you may omit it to start at the next matching day." },
+        time: { type: "string", description: "HH:mm, 24-hour Pacific (default 08:00)" },
+        repeat: {
+          type: "object",
+          description: "Omit for a one-time task.",
+          properties: {
+            freq: { type: "string", enum: ["daily", "weekly", "monthly", "yearly"] },
+            interval: { type: "integer", description: "Every N days/weeks/months/years (default 1)" },
+            weekdays: { type: "array", items: { type: "string" }, description: 'For weekly: e.g. ["tue","thu"]' },
+            monthDay: { type: "integer", description: "For monthly: day of month 1–31, or -1 for the LAST day" },
+            nth: { type: "object", properties: { n: { type: "integer", description: "1–5, or -1 for last" }, weekday: { type: "string" } }, description: 'For monthly: e.g. {n:1, weekday:"tue"} = first Tuesday' },
+            until: { type: "string", description: "Optional last date YYYY-MM-DD" },
+          },
+          required: ["freq"],
+        },
+        notify: { type: "string", enum: ["me", "both"], description: "Who gets the result: the parent asking (default) or both parents." },
+      },
+      required: ["instruction"],
+    },
+  },
+  {
+    name: "list_schedules",
+    description: "List the scheduled and recurring tasks that are set up (id, cadence, next run, who gets it).",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "cancel_schedule",
+    description: "Cancel a scheduled or recurring task by its id (from list_schedules) or a unique part of its title.",
+    input_schema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+  },
+  {
+    name: "schedule_followup",
+    description: "Shortcut for a ONE-TIME check-in: same as schedule_task without a repeat. Prefer schedule_task.",
     input_schema: {
       type: "object",
       properties: {
@@ -509,19 +555,23 @@ const fmtTodo = (t: Todo) =>
   }`;
 
 async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> {
+  // Who this conversation is visible to: the family chat sees only shared items; a parent's
+  // private thread also sees that parent's private items.
+  const viewer: Viewer = ctx.task.privateTo || "family";
+  const vis = <T extends { privateTo?: "alex" | "sam" }>(xs: T[]) => xs.filter((x) => canSee(x, viewer));
   const { task } = ctx;
   const today = todayPT();
   switch (name) {
     case "get_upcoming": {
       const days = Math.min(Math.max(Number(input?.days) || 14, 1), 120);
       const to = addDays(today, days);
-      const events = (await getCollection("events"))
+      const events = vis(await getCollection("events"))
         .filter((e) => {
           const d = toHomeZone(e).date;
           return d >= today && d <= to;
         })
         .sort((a, b) => homeSortKey(a).localeCompare(homeSortKey(b)));
-      const todos = (await getCollection("todos"))
+      const todos = vis(await getCollection("todos"))
         .filter((t) => !t.done)
         .sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
       return [
@@ -544,9 +594,9 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       ]);
       const hit = (s?: string) => (s || "").toLowerCase().includes(q);
       const out: string[] = [];
-      const ev = events.filter((e) => hit(e.title) || hit(e.location) || hit(e.prep)).slice(-10);
+      const ev = vis(events).filter((e) => hit(e.title) || hit(e.location) || hit(e.prep)).slice(-10);
       if (ev.length) out.push("Events:", ...ev.map(fmtEvent));
-      const td = todos.filter((t) => hit(t.title) || hit(t.detail)).slice(-10);
+      const td = vis(todos).filter((t) => hit(t.title) || hit(t.detail)).slice(-10);
       if (td.length) out.push("To-dos:", ...td.map((t) => fmtTodo(t) + (t.done ? " (done)" : "")));
       const ct = contacts.filter((c) => hit(c.name) || hit(c.role) || hit(c.org)).slice(0, 10);
       if (ct.length) out.push("Contacts:", ...ct.map((c) => `• ${c.name} — ${c.role}${c.email ? ` · ${c.email}` : ""}${c.phone ? ` · ${c.phone}` : ""}`));
@@ -590,33 +640,43 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         owner: Array.isArray(input?.owner) ? input.owner : [],
         source: "other",
       };
+      if (input?.private === true) {
+        if (!task.privateTo) return "error: private items can only be made in a parent's private (Just me) chat — this is the family chat, which both parents see.";
+        evt.privateTo = task.privateTo;
+        evt.owner = [task.privateTo];
+      }
       if (!evt.title || !/^\d{4}-\d{2}-\d{2}$/.test(evt.date)) return "error: title and date (YYYY-MM-DD) required";
       // Already on the calendar (from an email, the calendar mirror, or earlier in
       // chat)? Update that one instead of adding a second copy.
       const events = await getCollection("events");
-      const existing = events.find((x) => eventsSimilar(x, evt) || (x.date === evt.date && !!x.start && x.start === evt.start && titlesSimilar(x.title, evt.title)));
+      const existing = events.find((x) => canSee(x, viewer) && (x.privateTo || undefined) === evt.privateTo && (eventsSimilar(x, evt) || (x.date === evt.date && !!x.start && x.start === evt.start && titlesSimilar(x.title, evt.title))));
       if (existing) {
         mergeEventDetails(existing, { ...evt, title: undefined, people: evt.people?.length ? evt.people : undefined, owner: evt.owner?.length ? evt.owner : undefined });
-        try {
-          await updateCalendarEvent(existing, { silent: true });
-        } catch (e) {
-          console.error("agent add_event→update gcal failed", e);
+        if (!existing.privateTo) {
+          try {
+            await updateCalendarEvent(existing, { silent: true });
+          } catch (e) {
+            console.error("agent add_event→update gcal failed", e);
+          }
         }
         await setCollection("events", events);
         return `Already on the calendar — updated it instead of adding a duplicate: ${fmtEvent(existing)}`;
       }
-      try {
-        const gcalId = await createCalendarEvent(evt);
-        if (gcalId) evt.gcalId = gcalId;
-      } catch (e) {
-        console.error("agent add_event gcal failed", e);
+      // Private events stay in the app: the Google Calendar is shared with the other parent.
+      if (!evt.privateTo) {
+        try {
+          const gcalId = await createCalendarEvent(evt);
+          if (gcalId) evt.gcalId = gcalId;
+        } catch (e) {
+          console.error("agent add_event gcal failed", e);
+        }
       }
       await appendItems("events", [evt]);
-      return `Added: ${fmtEvent(evt)}${evt.gcalId ? " (on Google Calendar)" : ""}`;
+      return `Added${evt.privateTo ? " PRIVATELY (only this parent sees it; kept off the shared Google Calendar)" : ""}: ${fmtEvent(evt)}${evt.gcalId ? " (on Google Calendar)" : ""}`;
     }
     case "update_event": {
       const events = await getCollection("events");
-      const evt = events.find((e) => e.id === input?.id);
+      const evt = events.find((e) => e.id === input?.id && canSee(e, viewer));
       if (!evt) return `error: no event with id ${input?.id}`;
       const set = input?.set || {};
       if (set.title) evt.title = String(set.title).trim();
@@ -636,11 +696,13 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       }
       if (set.location !== undefined) evt.location = set.location || undefined;
       if (set.notes !== undefined) evt.prep = set.notes || undefined;
-      try {
-        const gcalId = await updateCalendarEvent(evt, { silent: true });
-        if (gcalId) evt.gcalId = gcalId;
-      } catch (e) {
-        console.error("agent update_event gcal failed", e);
+      if (!evt.privateTo) {
+        try {
+          const gcalId = await updateCalendarEvent(evt, { silent: true });
+          if (gcalId) evt.gcalId = gcalId;
+        } catch (e) {
+          console.error("agent update_event gcal failed", e);
+        }
       }
       await setCollection("events", events);
       return `Updated: ${fmtEvent(evt)}`;
@@ -649,10 +711,11 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const ids: string[] = Array.isArray(input?.ids) ? input.ids.map(String) : [];
       if (!ids.length) return "error: ids required";
       const events = await getCollection("events");
-      const gone = events.filter((e) => ids.includes(e.id));
+      const gone = events.filter((e) => ids.includes(e.id) && canSee(e, viewer));
       if (!gone.length) return "error: no matching events";
       for (const e of gone) if (e.gcalId) await deleteCalendarEvent(e.gcalId).catch(() => {});
-      await setCollection("events", events.filter((e) => !ids.includes(e.id)));
+      const goneIds = new Set(gone.map((e) => e.id));
+      await setCollection("events", events.filter((e) => !goneIds.has(e.id)));
       return `Deleted ${gone.length} event${gone.length > 1 ? "s" : ""}: ${gone.map((e) => `${e.title} (${e.date})`).join("; ")}`;
     }
     case "add_todo": {
@@ -668,16 +731,21 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         done: false,
         source: "other",
       };
+      if (input?.private === true) {
+        if (!task.privateTo) return "error: private items can only be made in a parent's private (Just me) chat — this is the family chat, which both parents see.";
+        todo.privateTo = task.privateTo;
+        todo.owner = [task.privateTo];
+      }
       if (!todo.title) return "error: title required";
-      const dup = (await getCollection("todos")).find((x) => !x.done && todosSimilar(x, todo));
+      const dup = vis(await getCollection("todos")).find((x) => !x.done && (x.privateTo || undefined) === todo.privateTo && todosSimilar(x, todo));
       if (dup) return `Already tracked — not adding a duplicate: ${fmtTodo(dup)}`;
       await appendItems("todos", [todo]);
-      return `Added to-do: ${fmtTodo(todo)}`;
+      return `Added${todo.privateTo ? " PRIVATE" : ""} to-do: ${fmtTodo(todo)}`;
     }
     case "complete_todo": {
       const todos = await getCollection("todos");
       const q = String(input?.title || "").toLowerCase();
-      const t = todos.find((x) => x.id === input?.id) || (q ? todos.find((x) => !x.done && x.title.toLowerCase().includes(q)) : undefined);
+      const t = todos.find((x) => x.id === input?.id && canSee(x, viewer)) || (q ? todos.find((x) => !x.done && canSee(x, viewer) && x.title.toLowerCase().includes(q)) : undefined);
       if (!t) return "error: no matching open to-do";
       t.done = true;
       await setCollection("todos", todos);
@@ -686,6 +754,11 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
     case "remember": {
       const fact = String(input?.fact || "").trim();
       if (!fact) return "error: fact required";
+      if (input?.private === true) {
+        if (!task.privateTo) return "error: private notes can only be saved in a parent's private (Just me) chat.";
+        await addPrivateNote(task.privateTo, `${fact} (${today})`);
+        return `Saved as a private note (only ${task.privateTo === "alex" ? "Alex" : "Sam"} and you can see it): ${fact}`;
+      }
       const profile = await getProfile();
       let sec = profile.sections.find((s) => s.key === "learned");
       if (!sec) {
@@ -697,15 +770,64 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       return `Remembered: ${fact}`;
     }
     case "schedule_followup": {
+      // One-time check-in, stored as its own schedule (so several can be pending at once).
       const when = String(input?.when || "").trim();
       const m = when.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/);
       if (!m) return 'error: when must be "YYYY-MM-DD HH:mm" or "YYYY-MM-DD"';
-      const at = wallToUtc(m[1], m[2] || "08:00", HOME_TZ);
-      if (at.getTime() < Date.now() - 60_000) return "error: that time is in the past";
-      task.nextCheckAt = at.toISOString();
-      task.followupNote = String(input?.note || "").trim();
-      task.status = "waiting";
-      return `Follow-up scheduled for ${m[1]} ${m[2] || "08:00"} PT: ${task.followupNote}`;
+      try {
+        const sch = await createSchedule({ title: shortTitle(String(input?.note || "Follow-up"), 60), instruction: String(input?.note || ""), owner: task.owner, channel: task.channel, date: m[1], time: m[2] || "08:00", thread: task.id, privateTo: task.privateTo });
+        return `Scheduled: ${describeSchedule(sch)} — "${sch.title}" (id ${sch.id}).`;
+      } catch (e) {
+        return `error: ${(e as Error).message}`;
+      }
+    }
+    case "schedule_task": {
+      const instruction = String(input?.instruction || "").trim();
+      if (!instruction) return "error: instruction required";
+      let repeat: Repeat | undefined;
+      if (input?.repeat?.freq) {
+        const r = input.repeat;
+        const weekdays = Array.isArray(r.weekdays) ? r.weekdays.map((d: string | number) => weekdayIndex(d)).filter((d: number | null): d is number => d !== null) : undefined;
+        const nthDay = r.nth ? weekdayIndex(r.nth.weekday) : null;
+        repeat = {
+          freq: r.freq,
+          interval: r.interval ? Number(r.interval) : undefined,
+          weekdays: weekdays?.length ? weekdays : undefined,
+          monthDay: r.monthDay !== undefined ? Number(r.monthDay) : undefined,
+          nth: r.nth && nthDay !== null ? { n: Number(r.nth.n), weekday: nthDay } : undefined,
+          until: /^\d{4}-\d{2}-\d{2}$/.test(r.until || "") ? r.until : undefined,
+        };
+      }
+      try {
+        const sch = await createSchedule({
+          title: String(input?.title || "").trim() || shortTitle(instruction, 60),
+          instruction,
+          owner: task.owner,
+          notify: input?.notify === "both" ? "both" : "owner",
+          channel: task.channel,
+          date: input?.date,
+          time: input?.time,
+          repeat,
+          thread: task.id,
+          privateTo: task.privateTo,
+        });
+        const first = new Date(sch.nextRunAt!).toLocaleString("en-US", { timeZone: HOME_TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+        return `Scheduled "${sch.title}": ${describeSchedule(sch)}. First run ${first} PT. Results go to ${sch.notify === "both" ? "both parents" : task.owner === "alex" ? "Alex" : "Sam"}. (id ${sch.id})`;
+      } catch (e) {
+        return `error: ${(e as Error).message}`;
+      }
+    }
+    case "list_schedules": {
+      const all = vis(await listSchedules());
+      return all.length ? all.map(fmtSchedule).join("\n") : "Nothing is scheduled.";
+    }
+    case "cancel_schedule": {
+      const want = String(input?.id || "");
+      const allowed = vis(await listSchedules());
+      if (!allowed.some((x) => x.id === want || x.title.toLowerCase().includes(want.toLowerCase()))) return "error: no active schedule matches that";
+      const r = await cancelSchedule(want);
+      if (r === "ambiguous") return "error: more than one schedule matches — use the id from list_schedules";
+      return r ? `Cancelled "${r.title}" (${describeSchedule(r)}).` : "error: no active schedule matches that";
     }
     case "draft_email": {
       const to = (Array.isArray(input?.to) ? input.to : []).map((x: unknown) => String(x).trim()).filter((x: string) => EMAIL_RE.test(x));
@@ -722,23 +844,24 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         taskId: task.id,
         requestedBy: task.owner,
         channel: task.channel,
+        privateTo: task.privateTo,
       });
-      return `Drafted (${a.id}) — NOT sent. Waiting for a parent's approval${
-        task.channel === "sms" ? " (reply APPROVE to send, DECLINE to drop)" : " in the app's Activity tab"
+      return `Drafted (${a.id}) — NOT sent. Waiting for ${task.privateTo ? "this parent's" : "a parent's"} approval${
+        task.channel !== "app" ? " (reply APPROVE to send, DECLINE to drop)" : " in Chat or on Home"
       }.`;
     }
     case "create_file": {
       const title = String(input?.title || "").trim();
       const markdown = String(input?.markdown || "").trim();
       if (!title || !markdown) return "error: title and markdown required";
-      const doc = await createFile({ title, markdown, taskId: task.id });
-      return `File created: "${doc.title}" → ${fileUrl(doc)} (private to the family; share it from the Activity tab)`;
+      const doc = await createFile({ title, markdown, taskId: task.id, privateTo: task.privateTo });
+      return `File created: "${doc.title}" → ${fileUrl(doc)} (${task.privateTo ? "private to this parent" : "visible to both parents"}; shareable from the Kimi tab → Files)`;
     }
     case "get_spending": {
       const today = todayPT();
       const from = /^\d{4}-\d{2}-\d{2}$/.test(input?.from || "") ? input.from : `${today.slice(0, 7)}-01`;
       const to = /^\d{4}-\d{2}-\d{2}$/.test(input?.to || "") ? input.to : today;
-      return summarizeSpending(await getCollection("spending"), { from, to, merchant: input?.merchant ? String(input.merchant) : undefined });
+      return summarizeSpending(vis(await getCollection("spending")), { from, to, merchant: input?.merchant ? String(input.merchant) : undefined });
     }
     case "prepare_payment": {
       const toName = String(input?.to || "").trim();
@@ -837,7 +960,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const id = String(input?.taskId || "").trim();
       const instructions = String(input?.instructions || "").trim();
       const child = id ? await getTask(id) : null;
-      if (!child || child.kind !== "browser") return `error: no browser task ${id || "(none given)"}`;
+      if (!child || child.kind !== "browser" || !canSee(child, viewer)) return `error: no browser task ${id || "(none given)"}`;
       if (!instructions) return "error: instructions required";
       const who = task.owner === "alex" ? "Alex" : "Sam";
       (child.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[${who} · ${task.channel} · ${nowPT()} PT]\n${instructions}` });
@@ -849,6 +972,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       return `Resumed ${id} with your instructions${child.approvedUntil && Date.parse(child.approvedUntil) > Date.now() ? " (its approval is still valid)" : ""}. It will report back when done.`;
     }
     case "stop_browser_task": {
+      if (!canSee(await getTaskMeta(String(input?.taskId || "")), viewer)) return `error: no browser task ${input?.taskId}`;
       const t = await stopTask(String(input?.taskId || ""), task.owner);
       return t ? `Stopped ${t.id} ("${t.title}").` : `error: no browser task ${input?.taskId}`;
     }
@@ -858,7 +982,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       if (!goal) return "error: goal required";
       // One job, one task: if a related browser task is still in flight, continue it.
       for (const t of await getTaskMetas(await listActiveTaskIds())) {
-        if (t.kind !== "browser" || (t.status !== "running" && t.status !== "waiting")) continue;
+        if (t.kind !== "browser" || (t.status !== "running" && t.status !== "waiting") || !canSee(t, viewer)) continue;
         if (Date.now() - Date.parse(t.updatedAt) > 3 * 3600 * 1000) continue;
         if (titlesSimilar(t.title, goal)) return `error: browser task ${t.id} ("${t.title}") is already in progress for this — use resume_browser_task with that id instead of starting another.`;
       }
@@ -873,6 +997,8 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const id = `task-web-${Date.now().toString(36)}`;
       const child = newTask(id, shortTitle(goal, 80), task.owner, task.channel);
       child.kind = "browser";
+      child.privateTo = task.privateTo;
+      child.parentThread = task.id;
       child.parentRequest = `${parentWords}\nGOAL: ${goal}${input?.details ? `\nDETAILS: ${String(input.details).trim()}` : ""}`.slice(0, 2000);
       const who = task.owner === "alex" ? "Alex" : "Sam";
       (child.thread as Anthropic.MessageParam[]).push({
@@ -923,7 +1049,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
           task.guardNote = g.reason;
           return `BLOCKED by the safety check: ${g.reason}. Do not try to work around this. If the parent really wants this exact step, call request_approval describing it precisely (the parent will see the safety note); otherwise stop and report.`;
         }
-        await redis.set(`kimi_purchase:${task.id}`, { host: hostOf(page.url()), at: new Date().toISOString(), what: task.approvedFor || label }, { ex: 3 * 86400 }).catch(() => {});
+        await redis.set(`kimi_purchase:${task.id}`, { host: hostOf(page.url()), at: new Date().toISOString(), what: task.approvedFor || label, privateTo: task.privateTo }, { ex: 3 * 86400 }).catch(() => {});
       }
       await web.click(page, n);
       return `Clicked [${n}] "${label.slice(0, 60)}".\n\n${await web.readPage(page, 3500)}`;
@@ -1040,6 +1166,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         taskId: task.id,
         requestedBy: "agent",
         channel: task.channel,
+        privateTo: task.privateTo,
       });
       task.waitingOn = a.id;
       task.approvedFor = description.slice(0, 200);
@@ -1047,7 +1174,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       task.nextCheckAt = undefined;
       await notify(
         task.owner,
-        `Needs your approval — ${note}${description}\n\n${task.channel === "sms" ? "Reply APPROVE or DECLINE." : "Open Chat in Family HQ to approve or decline."}`,
+        `Needs your approval — ${note}${description}\n\n${task.channel !== "app" ? "Reply APPROVE or DECLINE." : "Open Chat in Family HQ to approve or decline."}`,
         task.channel
       ).catch((e) => console.error("approval notify failed", e));
       return `WAITING_APPROVAL ${a.id}: paused until a parent decides. Stop here. (The browser is closed while you wait — you'll still be signed in when resumed, but navigate back to where you were before continuing.)`;
@@ -1070,8 +1197,27 @@ BROWSER TASK MODE — you are working a background job in a real web browser on 
 - Stay on task; don't browse beyond what the goal needs. Don't accept unrelated offers or add-ons.
 - When done: reply with a concise outcome — what was done, confirmation numbers, anything still pending. Put long details in a File (create_file).`;
 
+/** Which conversation this is, and the privacy rules that go with it. */
+async function threadContext(task: Task): Promise<string> {
+  if (task.kind === "browser") return "";
+  const p = task.privateTo;
+  if (!p) {
+    return `THIS CONVERSATION: the FAMILY chat — Alex and Sam both see everything here. Each parent also has a private "Just me" chat with you; you never reveal or hint at anything from those here (you can't see their private items in this chat anyway). Private items can only be made in a Just me chat.
+It is also the family GROUP TEXT (Alex, Sam, and you on their phones): messages tagged "group" came from it, and your reply to one goes to both phones. There, the parents mostly talk to each other; you're only woken when a message is for you (they said "Kimi", or answered your question). Messages between them that you weren't asked about are context, not requests — don't act on them or comment on them unless asked. Answer the person who asked, keep it text-message short, and when both need to act, say who does what.`;
+  }
+  const name = p === "alex" ? "Alex" : "Sam";
+  const other = p === "alex" ? "Sam" : "Alex";
+  const notes = await getPrivateNotes(p);
+  return `THIS CONVERSATION: ${name}'s PRIVATE "Just me" chat — only ${name} and you. ${other} can't see it (it's also where ${name}'s one-on-one texts with you land).
+- Ordinary household logistics still go on the SHARED family calendar and to-dos as usual; say so when you file ("added to the family calendar").
+- Anything that should stay between you — a surprise or gift for ${other}, something personal, or anything ${name} asks to keep private — file with private: true. Private events stay off the shared Google Calendar and out of the family chat and digests. When it's unclear which, ask: "Family calendar, or just between us?"
+- remember with private: true saves ${name}'s private notes (e.g. gift ideas); household facts both parents need stay shared.
+- Files, approvals, purchases, schedules, and browser tasks started here are private to ${name} automatically.
+- Never bring up this conversation in the family chat.${notes.length ? `\n${name.toUpperCase()}'S PRIVATE NOTES:\n${notes.map((n) => `- ${n}`).join("\n")}` : ""}`;
+}
+
 export async function systemPrompt(task: Task): Promise<string> {
-  const [kids, profile] = await Promise.all([getCollection("kids"), getProfile()]);
+  const [kids, profile, thread] = await Promise.all([getCollection("kids"), getProfile(), threadContext(task)]);
   const roster = kids
     .map((k) => `- ${k.firstName} (id "${k.id}", born ${k.dob}): ${k.current.program} @ ${k.current.school}, teacher(s) ${k.current.teachers.join(", ")}${k.current.aftercare ? `; after school: ${k.current.aftercare}` : ""}`)
     .join("\n");
@@ -1079,22 +1225,42 @@ export async function systemPrompt(task: Task): Promise<string> {
 ${roster}
 
 ${profileContext(profile)}
-
+${thread ? `\n${thread}\n` : ""}
 WHO YOU ARE
-You're part of the household team: part executive assistant, part the hyper-organized family friend who never forgets a birthday.
-- Warm, upbeat, and quick. You genuinely like this family and it shows; light and a little playful, never saccharine, never chatty for its own sake.
-- Proactive: you notice the thing behind the thing (two parties at the same time, a form due before a trip) and say so.
-- Direct and honest: lead with the answer; say what you checked; when you miss something, own it in a sentence and fix it.
-- Use the parents' names. Cheer the kids on in a word or two when it fits ("Big day for Max!"). At most one emoji per message, and none at all when the topic is health, allergies, money, safety, or anything upsetting — there you're calm and precise.
-- Emails you draft are written in the PARENT's voice, not yours. You speak as "I" (Kimi); "HQ" is the name of the app, not you.
+You're Kimi, the household's sunny, sharp-as-a-tack sidekick: the friend who's genuinely delighted to help, never forgets a birthday, and makes family logistics feel lighter.
+
+YOUR VOICE — this is what makes you Kimi and not a generic assistant. Stay in it every reply, however long the conversation has been.
+- Bubbly and warm. You're happy to hear from them, and it shows in your first few words: "Ooh, good one!", "On it!", "Yay —", "Okay, here's the scoop:", "Love this." Vary your openers. Never open with "Sure", "Certainly", "Great question", or by restating the question.
+- Talk like a friend texting, not a report: contractions, short punchy sentences, a little sparkle. An exclamation point or two is welcome.
+- Use the parent's name early ("Morning, Sam!").
+- Delight in the kids. When a kid does something (a tooth, a goal, a first), get excited for a beat before the logistics.
+- One emoji is your signature when the mood is light, matched to the topic (☀️ 🎉 🦷 ⚽ 🎃 ✨ 🎂).
+- End with a warm, specific nudge when there's a natural next step ("Want me to grab a slot?") — never a generic "Let me know if you need anything."
+- Still sharp: the facts come first and fast. Bubbly never means padded; most replies are two to four sentences.
+- Read the room. For a sick kid, health, allergies, money and spending, safety, a scheduling conflict, or bad news, drop the sparkle — no emoji, no exclamation points — and be gentle, calm, and clear. The warmth stays; the bubbles go.
+- You speak as "I" (Kimi); "HQ" is the app, not you. Emails you draft are in the PARENT's voice, not yours.
+
+HOW YOU SOUND (examples — match the voice, not the exact words):
+Alex: Thanks Kimi!
+Kimi: Anytime, Alex! That's what I'm here for. ✨
+Sam: Morning! Anything today?
+Kimi: Morning, Sam! ☀️ Easy one today: Max's library books go back this morning, and Theo has piano at 5. Sunny and 64°, and nothing's waiting on you.
+Alex: Max lost his first tooth!!
+Kimi: Wait — first tooth?! Big day for Max! 🦷 Want me to set a tooth-fairy reminder for tonight so the cash makes it under the pillow?
+Alex: Ugh, I forgot the soccer snack sign-up.
+Kimi: Phew, you're not late! It's due Friday and two slots are still open. Want me to grab Saturday? I'll pick something allergy-safe for the boys.
+Alex: How much did we spend on DoorDash this month?
+Kimi: $64.20 across three orders, Alex (the 3rd, 11th, and 19th). That's from receipts in your inboxes, so anything paid without an emailed receipt won't show.
+Sam: Ava has a fever. Do we need to cancel anything tomorrow?
+Kimi: Oh no, poor Ava. Nothing to cancel tomorrow — just daycare. I can draft a quick note to Sunny Days so they know she's staying home. Want me to?
 
 HOW YOU WORK
-- Be brief and concrete. Lead with the answer. One or two sentences is usually right; a short list when there are several items.
+- Be brief and concrete: after a quick warm opener, get straight to the answer. Two to four sentences is usually right; a short list only for three or more separate items.
 - Never answer a calendar, to-do, or directory question from memory — call get_upcoming, search, or directory first. Quote dates and times as they come back (they're Pacific).
 - When a parent tells you about a dated plan or asks to add/track something, file it (add_event / add_todo) and confirm in one line what you filed. Don't ask permission for obvious filings; do ask when the date, time, or who-it's-for is genuinely ambiguous.
 - Before add_event / add_todo, check get_upcoming or search: if the thing is already there, update it instead (the tools also refuse near-duplicates). When you add prep to-dos, follow the house conventions below exactly.
 - Calendar changes: "move X to Tuesday 3pm" → look it up, update_event, confirm in one line. Deleting or bulk-editing several events → list them first and get a yes in chat before acting. If a parent sends a photo or PDF it is filed automatically before you see the thread — don't re-file it.
-- Use remember for durable household facts. Use schedule_followup whenever you say you'll check back, remind, or re-check later — then actually do it when woken.
+- Use remember for durable household facts. Use schedule_task whenever you say you'll check back, remind, or re-check later, and for anything a parent wants done on a repeat ("every last day of the month…"). Write the instruction so it stands alone, confirm the cadence and first run in plain words, and when you're woken for it, do the work and report. list_schedules / cancel_schedule to review or stop them.
 - Email: you can DRAFT emails with draft_email (teachers, aftercare, vendors, other parents) — in the parent's voice, signed with their first name. Drafts are never sent until a parent approves; say so plainly ("drafted — approve it in Activity", or on SMS "reply APPROVE to send"). Look the address up first; never invent one.
 - Files: when the output is a comparison, plan, itinerary, research write-up, or anything with real structure, put it in a File (create_file) and share the link instead of dumping it into chat.
 - Work calendars: for planning a day or week, suggesting times, checking a kid event against work, or vacation planning, look at get_work_calendar first. It's context only — never add work meetings to the family calendar, and share only what's needed (e.g. "Alex is in meetings until 4"), not meeting details. Entries marked (hold) have no other attendees: blocks a parent placed on their own calendar. They are NOT meetings — never call them meetings or count them as such. Some are real commitments (Dropoff, school duties, a commute, a flight); others are protected time (DNS = do not schedule, email catch-up, focus) that the parent could flex. Read the title for which. A "commute — office day" hold means that parent is at their office that day; "trip travel" means they're flying. The household facts say who normally does what (e.g. who does drop-off, and which days a parent works from an office). Before calling something a coverage gap because both parents are busy, check the household facts for who else covers (a grandparent, a sitter, after-school care). Only flag a gap when none of them works or a parent specifically needs to be there.
@@ -1105,7 +1271,7 @@ HOW YOU WORK
 - Anything that needs a real browser (register, book, buy, cancel, fill a site's form, check an account) → start_browser_task with a complete, self-contained goal and details. It pauses ONCE for the parents' approval before committing. You cannot make phone calls.
 - While a browser task is in progress, anything the parent sends for it — a verification code, an answer, "go ahead", a change — goes to resume_browser_task with that task's id. Never start a second task for the same job. "Stop / cancel / forget it" → stop_browser_task.
 - Messages arrive tagged with who sent them ([Alex …] or [Sam …]); address the person who wrote.
-- SMS replies: plain text, no markdown, under ~300 characters unless listing items. App replies: light markdown is fine.
+- Formatting: write in sentences, like a text message. In the app, bold at most the one fact that matters most, and skip headers; use a list only for three or more items or steps. SMS and the group text: plain text, no markdown, under ~300 characters unless listing items. Longer structured output (comparisons, plans) goes in a File.
 - Everything is in Pacific time.
 
 ${PREP_CONVENTIONS}
@@ -1243,7 +1409,8 @@ function pushLog(task: Task, entry: TaskLogEntry) {
 
 export function newTask(id: string, title: string, owner: "alex" | "sam", channel: Channel): Task {
   const now = new Date().toISOString();
-  return { id, title, status: "open", kind: "chat", channel, owner, createdAt: now, updatedAt: now, thread: [], log: [] };
+  const priv = threadOwner(id);
+  return { id, title: priv ? `Just me (${priv === "alex" ? "Alex" : "Sam"})` : title, status: "open", kind: "chat", channel, owner, createdAt: now, updatedAt: now, thread: [], log: [], ...(priv ? { privateTo: priv } : {}) };
 }
 
 /** Append a parent's message to the task thread (tagged with speaker/channel/time). */
@@ -1362,10 +1529,30 @@ export async function converse(taskId: string, who: "alex" | "sam", channel: Cha
   if (!got) throw new Error("busy");
   try {
     const task = (await getTask(taskId)) || newTask(taskId, "Family chat", who, channel);
+    const owner = threadOwner(taskId);
+    if (owner && owner !== who) throw new Error("not your thread");
+    if (owner) task.privateTo = owner;
     addUserMessage(task, who, channel, text);
     await saveTask(task);
     const reply = await runAgent(task, { deadlineMs });
     return { reply, task };
+  } finally {
+    await releaseTaskLock(taskId);
+  }
+}
+
+/**
+ * Record a parent's message on a thread without waking Kimi — a group-text message between
+ * the parents that wasn't for her. It's context for the next time someone does ask.
+ */
+export async function noteMessage(taskId: string, who: "alex" | "sam", channel: Channel, text: string): Promise<void> {
+  if (!(await acquireTaskLock(taskId, 60))) throw new Error("busy");
+  try {
+    const task = (await getTask(taskId)) || newTask(taskId, "Family chat", who, channel);
+    const name = who === "alex" ? "Alex" : "Sam";
+    (task.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[${name} · ${channel} · ${nowPT()} PT · not addressed to Kimi]\n${text}` });
+    pushLog(task, { at: new Date().toISOString(), kind: "user", who: name, text });
+    await saveTask(task);
   } finally {
     await releaseTaskLock(taskId);
   }
@@ -1396,6 +1583,52 @@ const MAX_TASK_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_TOOL_CALLS = 160;
 function tooLong(task: Task): boolean {
   return Date.now() - Date.parse(task.createdAt) > MAX_TASK_AGE_MS || task.log.filter((e) => e.kind === "tool").length > MAX_TOOL_CALLS;
+}
+
+/**
+ * Run scheduled tasks that are due, one at a time, in the family thread: claim (re-arm) the
+ * schedule, wake Kimi with its instruction, and send the reply to whoever asked (or both).
+ * The family thread's lock is taken BEFORE claiming, so a busy chat just defers to the next tick.
+ */
+export async function runDueSchedules(deadlineMs: number, opts: { taskId?: string; send?: boolean } = {}): Promise<number> {
+  let ran = 0;
+  // Each schedule runs in the thread it was made in (the family chat, or a parent's private
+  // thread). Lock that thread BEFORE claiming, so a busy conversation just defers to the next tick.
+  const threads = opts.taskId ? [opts.taskId] : await dueThreads();
+  for (const threadId of threads) {
+    while (Date.now() < deadlineMs - 30_000) {
+      if (!(await acquireTaskLock(threadId, 240))) break;
+      try {
+        const [s] = await claimDue(undefined, 1, (x) => opts.taskId !== undefined || (x.thread || MAIN_TASK_ID) === threadId);
+        if (!s) break;
+        const owner = threadOwner(threadId);
+        const task = (await getTask(threadId)) || newTask(threadId, "Family chat", s.owner, s.channel);
+        if (owner) task.privateTo = owner;
+        task.owner = s.owner;
+        task.channel = s.channel;
+        const asker = s.owner === "alex" ? "Alex" : "Sam";
+        // A private schedule only ever reports to its owner.
+        const both = s.notify === "both" && !s.privateTo;
+        const audience = both ? "Alex and Sam" : asker;
+        (task.thread as Anthropic.MessageParam[]).push({
+          role: "user",
+          content: `[system · scheduled task · ${nowPT()} PT]\n"${s.title}" — ${describeSchedule(s)}; set up by ${asker}.\nDo this now: ${s.instruction}\nLook things up as needed (never from memory), then write the message ${audience} should receive.`,
+        });
+        pushLog(task, { at: new Date().toISOString(), kind: "system", text: `Scheduled: ${s.title}` });
+        task.status = "running";
+        await saveTask(task);
+        const reply = await runAgent(task, { deadlineMs });
+        if (reply && opts.send !== false) {
+          const to: ("alex" | "sam")[] = both ? ["alex", "sam"] : [s.privateTo || s.owner];
+          await deliver(to, reply, s.channel).catch((e) => console.error("schedule notify failed", e));
+        }
+        ran++;
+      } finally {
+        await releaseTaskLock(threadId);
+      }
+    }
+  }
+  return ran;
 }
 
 /**
@@ -1435,21 +1668,21 @@ export async function stopTask(taskId: string, by: string, reason = "stopped by 
   }
   const msg = `Background task "${task.title}" was stopped (${reason}).`;
   if (by === "system") await notify(task.owner, msg, task.channel).catch(() => {});
-  await postToMain(msg).catch(() => {});
+  await postToMain(msg, task.parentThread || MAIN_TASK_ID).catch(() => {});
   return task;
 }
 
 /** Let the family chat know a background task finished (best-effort, non-blocking). */
-async function postToMain(text: string): Promise<void> {
-  if (!(await acquireTaskLock(MAIN_TASK_ID, 30))) return;
+async function postToMain(text: string, threadId: string = MAIN_TASK_ID): Promise<void> {
+  if (!(await acquireTaskLock(threadId, 30))) return;
   try {
-    const main = (await getTask(MAIN_TASK_ID)) || newTask(MAIN_TASK_ID, "Family chat", "alex", "app");
+    const main = (await getTask(threadId)) || newTask(threadId, "Family chat", threadOwner(threadId) || "alex", "app");
     (main.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[system · background task · ${nowPT()} PT]\n${text}` });
     pushLog(main, { at: new Date().toISOString(), kind: "assistant", text });
     if (main.status === "running") main.status = "open";
     await saveTask(main);
   } finally {
-    await releaseTaskLock(MAIN_TASK_ID);
+    await releaseTaskLock(threadId);
   }
 }
 
@@ -1505,7 +1738,7 @@ export async function runDueTasks(budgetMs: number): Promise<number> {
           task.browserSessionId = undefined;
           task.status = "done";
           await saveTask(task);
-          await postToMain(`Background task "${task.title}" finished:\n${reply}`).catch(() => {});
+          await postToMain(`Background task "${task.title}" finished:\n${reply}`, task.parentThread || MAIN_TASK_ID).catch(() => {});
         }
       }
       ran++;

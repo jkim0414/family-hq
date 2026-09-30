@@ -22,6 +22,16 @@ Theo, and Ava) is fictional.
   checklist.
 - **Answers and acts in chat.** One conversation shared by both parents, in the app or by
   SMS. Ask about the schedule, hand off a task, send a photo or PDF to file it.
+- **Private "Just me" threads.** Each parent also has a private thread with Kimi, which is
+  where their one-on-one texts land. Anything filed there can be fully private (a surprise,
+  a gift idea, a purchase) and is then visible only to that parent: never in the family chat,
+  the other parent's app, the digests, or the shared calendar.
+- **A family group text.** Once both parents opt in to texts, Kimi starts a group text with
+  them from her own number, and it mirrors into the family chat. She answers when named, or
+  when a model reading the recent messages judges a message is for her (a follow-up on her
+  plan, a question she can answer), and stays quiet when the parents are talking to each other.
+- **Scheduled and recurring tasks.** "Check on the RSVP next Tuesday", "every last day of the
+  month, recap our spending": Kimi runs them on time and reports to whoever asked.
 - **Plans around work.** Both parents' work calendars are read as private context — never
   copied to the family calendar — with holds (drop-off, focus time, commutes) told apart from
   meetings.
@@ -60,7 +70,12 @@ Login is a 6-digit emailed code, parents only.
 - **Browser:** Browserbase (hosted Chrome over CDP, driven with `playwright-core`); a local
   Chromium in development.
 - **Scheduling:** an external cron hits `/api/ingest` every minute; each stage self-gates
-  (inbox watch and calendar mirror every ~15 minutes).
+  (inbox watch and calendar mirror every ~15 minutes). Scheduled tasks live in Redis; the
+  cron reads a single "next run" key until one is due.
+- **SMS:** Twilio, one-on-one through a Messaging Service webhook (`/api/sms`) and the family
+  group text through Twilio Conversations group MMS (`api/_lib/groupsms.ts`, `/api/sms/group`).
+  Twilio also hands a group message to the one-on-one webhook, which drops it after finding
+  it in the group.
 - **Weather / travel:** US National Weather Service; OpenStreetMap Nominatim + OSRM.
 
 ## Make it yours
@@ -78,7 +93,12 @@ Login is a 6-digit emailed code, parents only.
    (allergies, who covers pickups, vendors) are household facts you edit in the app.
 5. **Your SMS pages.** `public/sms.html`, `terms.html`, and `privacy.html` are templates for
    an A2P 10DLC registration — replace the placeholder number, email, and business name.
-6. **Kimi's avatar.** `public/kimi.jpg` and `public/kimi-192.png` are placeholders.
+6. **Kimi's avatar.** `public/kimi.jpg` and `public/kimi-192.png` are placeholders. Texts
+   can't carry an avatar, so Kimi texts each parent a contact card after they opt in:
+   `public/kimi.vcf`, a vCard with her number and the avatar embedded — update its `TEL` and
+   `PHOTO` for yours.
+7. **Kimi's voice.** Her personality and example exchanges are in `systemPrompt()` in
+   `api/_lib/agent.ts`; `scripts/persona-check.ts` checks whether it comes through.
 
 ## Local development
 
@@ -94,7 +114,11 @@ Useful scripts in `scripts/` (run with `npx tsx`): `session.ts` mints a login co
 curl, `browser-e2e.ts` tests the approval loop against a local Chromium, `guard-check.ts`
 exercises the safety check, `card-fill-check.ts` tests card filling with Stripe's test card,
 `redis-count.ts` counts Redis commands per cron tick, `cache-check.ts` measures prompt
-caching, and `demo/screenshots.ts` renders the app with fake data.
+caching, `schedule-check.ts` tests the recurrence rules, `privacy-check.ts` tests private
+threads, `group-triage-check.ts` tests when Kimi speaks up in the group text,
+`persona-check.ts` is a blind A/B of her voice, and `demo/screenshots.ts` renders the app
+with fake data. `npm run typecheck` also fails on relative imports without `.js` (they
+break Node ESM on Vercel).
 
 ## Environment
 

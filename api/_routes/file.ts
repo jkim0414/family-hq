@@ -16,7 +16,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; img-src https: data:");
   if (!doc) return res.status(404).send("<!doctype html><p style='font-family:system-ui'>No such file.</p>");
 
-  const allowed = (doc.public && doc.shareToken && t === doc.shareToken) || !!(await requireUser(req));
+  // A shared link opens for anyone; otherwise a signed-in parent — and a private file only for its owner.
+  const viewer = await requireUser(req);
+  const allowed = (doc.public && doc.shareToken && t === doc.shareToken) || (!!viewer && (!doc.privateTo || doc.privateTo === viewer.id));
   if (!allowed) {
     return res
       .status(401)

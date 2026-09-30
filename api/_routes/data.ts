@@ -2,6 +2,7 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getState, getStateVersion, getCollection } from "../_lib/db.js";
 import { json } from "../_lib/http.js";
 import { requireUser } from "../_lib/auth.js";
+import { canSee } from "../_lib/privacy.js";
 
 // GET /api/data            → app state for the frontend (logged-in parents only)
 // GET /api/data?v=<n>      → { unchanged: true } when nothing was written since version n
@@ -22,11 +23,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const v = await getStateVersion();
     if (typeof req.query.v === "string" && Number(req.query.v) === v && v > 0) return json(res, 200, { unchanged: true, v });
     const state = await getState();
+    // Private items are only ever sent to the parent they belong to.
+    const mine = <T extends { privateTo?: "alex" | "sam" }>(xs: T[]) => (xs || []).filter((x) => canSee(x, user.id));
     const slim = {
       ...state,
+      events: mine(state.events),
+      todos: mine(state.todos),
+      spending: mine(state.spending),
+      schedules: mine(state.schedules),
+      audit: mine(state.audit),
       v,
       comms: state.comms.map(({ raw, ...c }) => ({ ...c, hasRaw: !!raw })),
-      actions: state.actions.map((a) => {
+      actions: mine(state.actions).map((a) => {
         const p = a.payload as { screenshot?: string };
         if (!p?.screenshot) return a;
         const { screenshot: _s, ...rest } = p;

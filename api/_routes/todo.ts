@@ -6,7 +6,8 @@ import { requireUser } from "../_lib/auth.js";
 // POST /api/todo  { id, done }  — toggle a to-do's done state (shared between parents).
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") return json(res, 405, { error: "POST only" });
-  if (!(await requireUser(req))) return json(res, 401, { error: "unauthorized" });
+  const user = await requireUser(req);
+  if (!user) return json(res, 401, { error: "unauthorized" });
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const { id, done } = body || {};
@@ -14,7 +15,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return json(res, 400, { error: "id and done required" });
     }
     const todos = await getCollection("todos");
-    const t = todos.find((x) => x.id === id);
+    const t = todos.find((x) => x.id === id && (!x.privateTo || x.privateTo === user.id));
     if (!t) return json(res, 404, { error: "not found" });
     t.done = done;
     await setCollection("todos", todos);

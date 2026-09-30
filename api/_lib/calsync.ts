@@ -64,7 +64,8 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
   result.scanned = raw.length;
   if (!raw.length) return result;
 
-  const existingEvents = await getCollection("events");
+  // Private items (a parent's Just-me chat) are never matched, shown to the classifier, or updated by filing.
+  const existingEvents = (await getCollection("events")).filter((e) => !e.privateTo);
   // App-created events (via email/capture) — never mirror these.
   const mirrorsByGcal = new Map(
     existingEvents.filter((e) => e.source === "calendar" && e.gcalId).map((e) => [e.gcalId as string, e])
@@ -77,7 +78,7 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
 
   const newEvents: CalEvent[] = [];
   const newTodos: Todo[] = [];
-  const existingTodos = await getCollection("todos");
+  const existingTodos = (await getCollection("todos")).filter((t) => !t.privateTo);
   const newComms: Comm[] = [];
   const changedMirrors: CalEvent[] = [];
   const verUpdates: Record<string, string> = {};

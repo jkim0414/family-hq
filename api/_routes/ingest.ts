@@ -3,7 +3,7 @@ import { authorized, json } from "../_lib/http.js";
 import { fetchUnseen, markSeen } from "../_lib/imap.js";
 import { isUidSeen, markUidSeen, redis, setLastCalSync } from "../_lib/db.js";
 import { importCalendarEvents, type CalSyncResult } from "../_lib/calsync.js";
-import { runDueTasks } from "../_lib/agent.js";
+import { runDueTasks, runDueSchedules } from "../_lib/agent.js";
 import { fileMessages, type FileInput } from "../_lib/file-mail.js";
 import { runWatch, type WatchStats } from "../_lib/watch.js";
 import { sweepVerifiable } from "../_lib/verify.js";
@@ -32,11 +32,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Every later stage is time-gated. Read all the gates in ONE command: this runs
     // every minute, so an idle tick is now smembers + mget (tasks) + this mget.
-    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast] =
+    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast, schedulesNext] =
       (await redis
-        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last")
+        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last", "schedules_next")
         .catch(() => null)) || [];
     const num = (v: unknown) => Number(v || 0);
+
+    // Scheduled and recurring tasks: only when the earliest one is due (one key, read above).
+    let scheduled = 0;
+    try {
+      if (num(schedulesNext) && Date.now() >= num(schedulesNext)) scheduled = await runDueSchedules(started + 200_000);
+    } catch (e) {
+      console.error("scheduled tasks failed", e);
+    }
 
     // Mirror the Personal calendar (time-gated to ~every 15 min so frequent
     // polls stay cheap). Best-effort; never blocks email ingest.
@@ -87,7 +95,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const lastSchool = num(schoolLast);
     if (Date.now() - lastSchool < 5 * 60 * 1000) {
-      return json(res, 200, { ok: true, fetched: 0, filed: 0, skipped: 0, calendar, tasksRan, watch, verified, travel, leaveAlerts, schoolInbox: "not due" });
+      return json(res, 200, { ok: true, fetched: 0, filed: 0, skipped: 0, calendar, tasksRan, watch, verified, travel, leaveAlerts, scheduled, schoolInbox: "not due" });
     }
     await redis.set("school_inbox_last", Date.now());
     const messages = await fetchUnseen(false);

@@ -4,12 +4,14 @@ import { Card, SectionHeader, Button, Toggle, KimiAvatar } from "../components/u
 import { SavedLogins } from "../components/SavedLogins";
 import { FilesList } from "../components/FilesList";
 import { SpendingList } from "../components/SpendingList";
+import { ScheduledList } from "../components/ScheduledList";
 import { History } from "../components/History";
 import { pushState, enablePush, disablePush, type PushState } from "../push";
 
 const JUMPS = [
   ["connections", "Connections"],
   ["logins", "Logins"],
+  ["scheduled", "Scheduled"],
   ["files", "Files"],
   ["spending", "Spending"],
   ["history", "History"],
@@ -43,6 +45,7 @@ export default function Assistant() {
       </section>
 
       <SavedLogins />
+      <ScheduledList />
       <FilesList />
       <SpendingList />
       <History />

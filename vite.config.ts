@@ -11,7 +11,7 @@ export default defineConfig({
       workbox: {
         // The SPA shell must NOT be served for server-rendered pages: the
         // login-link page (/api/auth/verify) and shared Files (/f/:id).
-        navigateFallbackDenylist: [/^\/api\//, /^\/f\//, /\.html$/],
+        navigateFallbackDenylist: [/^\/api\//, /^\/f\//, /\.html$/, /\.vcf$/],
         importScripts: ["push-sw.js"],
       },
       manifest: {

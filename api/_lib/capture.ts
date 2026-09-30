@@ -91,11 +91,12 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   const now = new Date().toISOString();
   const today = todayLocal();
 
+  // Private items (a parent's Just-me chat) are never matched, shown to the classifier, or updated by filing.
   const [existingEvents, existingComms, existingSuggestions, existingTodos] = await Promise.all([
-    getCollection("events"),
+    getCollection("events").then((xs) => xs.filter((e) => !e.privateTo)),
     getCollection("comms"),
     getCollection("suggestions"),
-    getCollection("todos"),
+    getCollection("todos").then((xs) => xs.filter((t) => !t.privateTo)),
   ]);
 
   // Reference dates so the model can resolve "start of school year" / "first Friday".

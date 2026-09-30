@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useData } from "../dataStore";
 import { fmtDate } from "../store";
-import { Card, Collapsible, TextAction } from "./ui";
+import { Card, Collapsible, TextAction, PrivateTag } from "./ui";
 
 const money = (n: number, cur = "USD") => {
   try {
@@ -51,6 +51,7 @@ export function SpendingList() {
                   <span>· {r.account === "alex" ? "Alex" : "Sam"}</span>
                   {r.cardLast4 && <span>· …{r.cardLast4}</span>}
                   {r.byKimi && <span className="rounded-md bg-accent-soft px-1.5 py-0.5 text-[10px] font-semibold text-accent">Kimi</span>}
+                  {r.privateTo && <PrivateTag />}
                 </div>
               </div>
             ))}
