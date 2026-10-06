@@ -36,6 +36,7 @@ import push from "./_routes/push.js";
 import gmail from "./_routes/gmail.js";
 import workcal from "./_routes/workcal.js";
 import schedules from "./_routes/schedules.js";
+import setup from "./_routes/setup.js";
 
 type Handler = (req: VercelRequest, res: VercelResponse) => Promise<unknown> | unknown;
 
@@ -59,6 +60,7 @@ const ROUTES: Record<string, Handler> = {
   gmail,
   workcal,
   schedules,
+  setup,
   "sms/group": smsGroup,
   "auth/request": authRequest,
   "auth/verify": authVerify,

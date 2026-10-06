@@ -32,11 +32,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Every later stage is time-gated. Read all the gates in ONE command: this runs
     // every minute, so an idle tick is now smembers + mget (tasks) + this mget.
-    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast, schedulesNext] =
+    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast, schedulesNext, lastSeen] =
       (await redis
-        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last", "schedules_next")
+        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last", "schedules_next", "ingest_seen")
         .catch(() => null)) || [];
     const num = (v: unknown) => Number(v || 0);
+    // "The heartbeat is running" for the Kimi tab's Setup list — refreshed every 10 minutes, not every tick.
+    if (Date.now() - num(lastSeen) > 10 * 60 * 1000) await redis.set("ingest_seen", Date.now()).catch(() => {});
 
     // Scheduled and recurring tasks: only when the earliest one is due (one key, read above).
     let scheduled = 0;

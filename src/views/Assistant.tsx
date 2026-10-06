@@ -5,11 +5,13 @@ import { SavedLogins } from "../components/SavedLogins";
 import { FilesList } from "../components/FilesList";
 import { SpendingList } from "../components/SpendingList";
 import { ScheduledList } from "../components/ScheduledList";
+import { SetupList } from "../components/SetupList";
 import { History } from "../components/History";
 import { pushState, enablePush, disablePush, type PushState } from "../push";
 
 const JUMPS = [
   ["connections", "Connections"],
+  ["setup", "Setup"],
   ["logins", "Logins"],
   ["scheduled", "Scheduled"],
   ["files", "Files"],
@@ -44,6 +46,7 @@ export default function Assistant() {
         </Card>
       </section>
 
+      <SetupList />
       <SavedLogins />
       <ScheduledList />
       <FilesList />

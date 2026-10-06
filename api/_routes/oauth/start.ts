@@ -6,10 +6,11 @@ import { requireUser, requestOrigin } from "../../_lib/auth.js";
 import { redis } from "../../_lib/db.js";
 import { GMAIL_SCOPES } from "../../_lib/gmail.js";
 
-// The registered redirect URI (Google Cloud console). The app is served from two
-// hostnames; the callback identifies the user by the one-time state nonce, not
-// by cookie, so it works regardless of which host started the flow.
-export const REDIRECT_URI = "https://your-app.vercel.app/api/oauth/callback";
+// The registered redirect URI (Google Cloud console): <APP_URL>/api/oauth/callback when APP_URL
+// is set, else this deployment's original hostname. The app is served from two hostnames; the
+// callback identifies the user by the one-time state nonce, not by cookie, so it works
+// regardless of which host started the flow.
+export const REDIRECT_URI = `${process.env.APP_URL || "https://your-app.vercel.app"}/api/oauth/callback`;
 
 // GET /api/oauth/start?secret=…      → Google consent for the family CALENDAR (one-time, admin)
 // GET /api/oauth/start?for=gmail     → Google consent for the LOGGED-IN parent's Gmail (read-only)

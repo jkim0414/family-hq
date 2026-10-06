@@ -9,6 +9,8 @@ Everything family-specific lives in a few config files and in the app's own hous
 facts, so the code stays generic. The example family in this repo (Alex, Sam, and kids Max,
 Theo, and Ava) is fictional.
 
+**To run your own, follow [SETUP.md](SETUP.md).**
+
 ## What it does
 
 - **Reads the family's email.** Each parent's Gmail is watched read-only (IMAP with a Gmail
@@ -128,10 +130,14 @@ break Node ESM on Vercel).
 
 ## Environment
 
-See `.env.local.example` for every variable. Required: `ANTHROPIC_API_KEY`, the Upstash
-`KV_REST_API_URL` / `KV_REST_API_TOKEN`, `CRON_SECRET`, the Google OAuth client, and an
-inbox for Kimi (`IMAP_USER` / `IMAP_PASS`). Everything else (parents' Gmail, Browserbase,
-1Password, Twilio, web push, weather) is optional and turns on the matching feature.
+**Start with [SETUP.md](SETUP.md)**: step by step for every piece, with what it unlocks and what
+it costs. Required: `ANTHROPIC_API_KEY`, the Upstash `KV_REST_API_URL` / `KV_REST_API_TOKEN`,
+`CRON_SECRET` plus an external every-minute heartbeat that calls `/api/ingest` (Vercel's Hobby
+cron is daily), `APP_URL`, the Google OAuth client, and an inbox for Kimi (`IMAP_USER` /
+`IMAP_PASS`; login codes come from it). Everything else (parents' Gmail, work calendars,
+Twilio, Browserbase, 1Password, web push, weather) is optional and turns on the matching
+feature. Once you can sign in, **Kimi tab → Setup** shows what's on and links to the guide.
+`.env.local.example` lists every variable.
 
 ## Privacy and safety notes
 
