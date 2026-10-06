@@ -1,6 +1,6 @@
 import { redis } from "./db.js";
 import { twilioAuth, readMedia, MEDIA_OK, type FetchedMedia } from "./twilio.js";
-import { smsBody, sendSms, getSmsOptIn, phoneFor, smsConfigured } from "./notify.js";
+import { smsBody, sendSms, getSmsOptIn, phoneFor, smsConfigured, tapbackText } from "./notify.js";
 import { CONFIG } from "../../src/data/config.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9,7 +9,7 @@ import { CONFIG } from "../../src/data/config.js";
 // Conversations "Group MMS" conversation: each parent is an SMS participant and
 // Kimi is a participant projected onto her number, so her messages come from it.
 // Group messages reach /api/sms/group (a conversation webhook) and go to the
-// family chat; one-on-one texts still reach /api/sms (Twilio only routes a
+// family chat — every one is for Kimi (the parents talk privately elsewhere); one-on-one texts still reach /api/sms (Twilio only routes a
 // message to the group when the whole set of people matches). US numbers only,
 // green-bubble MMS, max 10 people. It's created once both parents have opted in.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,9 +25,6 @@ const firstName = (p: "alex" | "sam") => CONFIG.parents[p].name.split(" ")[0];
 export interface Group {
   sid: string;
   createdAt: string;
-  /** Kimi's last message in the group, so a quick "yes please" reads as an answer to her. */
-  lastKimiAt?: string;
-  lastKimiText?: string;
 }
 
 async function tw<T = Record<string, unknown>>(path: string, form?: Record<string, string>, method = form ? "POST" : "GET"): Promise<T> {
@@ -91,7 +88,18 @@ export async function sendGroup(raw: string): Promise<boolean> {
   if (!g) return false;
   const body = smsBody(raw).slice(0, 1500);
   await tw(`/Conversations/${g.sid}/Messages`, { Author: KIMI_IDENTITY, Body: body });
-  await redis.set(KEY, { ...g, lastKimiAt: new Date().toISOString(), lastKimiText: body.slice(0, 500) });
+  return true;
+}
+
+/**
+ * Kimi reacts to a message in the group the way a phone does (`Liked “…”`). Group MMS keeps the
+ * curly quotes, so iPhones show it as a tapback on that bubble (tested on iOS).
+ */
+export async function sendGroupReaction(emoji: string, quoted: string): Promise<boolean> {
+  const g = await getGroup();
+  const body = tapbackText(emoji, quoted);
+  if (!g || !body) return false;
+  await tw(`/Conversations/${g.sid}/Messages`, { Author: KIMI_IDENTITY, Body: body });
   return true;
 }
 
@@ -115,7 +123,8 @@ export async function closeGroupAfterStop(who: "alex" | "sam"): Promise<void> {
 
 /** Download photos/PDFs from a group message (Conversations stores media in its own service). */
 export async function fetchGroupMedia(chatServiceSid: string, mediaJson: string): Promise<FetchedMedia[]> {
-  let list: { Sid?: string; ContentType?: string; Size?: number }[] = [];
+  // Webhooks send {Sid, ContentType}; the REST API sends {sid, content_type}. Accept both.
+  let list: { Sid?: string; sid?: string; ContentType?: string; content_type?: string }[] = [];
   try {
     list = JSON.parse(mediaJson || "[]");
   } catch {
@@ -123,10 +132,11 @@ export async function fetchGroupMedia(chatServiceSid: string, mediaJson: string)
   }
   const out: FetchedMedia[] = [];
   for (const m of list.slice(0, 4)) {
-    const type = (m.ContentType || "").toLowerCase();
-    if (!m.Sid || !MEDIA_OK.test(type)) continue;
+    const sid = m.Sid || m.sid;
+    const type = (m.ContentType || m.content_type || "").toLowerCase();
+    if (!sid || !MEDIA_OK.test(type)) continue;
     // The media record links to a short-lived direct URL (which must be fetched without our auth header).
-    const meta = await fetch(`https://mcs.us1.twilio.com/v1/Services/${chatServiceSid}/Media/${m.Sid}`, { headers: { authorization: twilioAuth() } })
+    const meta = await fetch(`https://mcs.us1.twilio.com/v1/Services/${chatServiceSid}/Media/${sid}`, { headers: { authorization: twilioAuth() } })
       .then((r) => (r.ok ? (r.json() as Promise<{ links?: { content_direct_temporary?: string } }>) : null))
       .catch(() => null);
     const url = meta?.links?.content_direct_temporary;
@@ -157,27 +167,4 @@ export async function postedToGroup(from: string, text: string): Promise<boolean
     if (hit) return true;
   }
   return false;
-}
-
-export interface GroupLine {
-  sid: string;
-  who: "Alex" | "Sam" | "Kimi";
-  text: string;
-  at: string;
-}
-
-/** The last few messages in the group, oldest first (for judging whether a new one is for Kimi). */
-export async function recentGroupMessages(limit = 8): Promise<GroupLine[]> {
-  const g = await getGroup();
-  if (!g) return [];
-  const digits = (s: string) => s.replace(/\D/g, "").replace(/^1(\d{10})$/, "$1");
-  const r = await tw<{ messages?: { sid: string; author?: string; body?: string | null; date_created?: string }[] }>(`/Conversations/${g.sid}/Messages?Order=desc&PageSize=${limit}`).catch(() => null);
-  return (r?.messages || [])
-    .map((m) => {
-      const a = m.author || "";
-      const who = a === KIMI_IDENTITY ? "Kimi" : digits(a) === digits(phoneFor("alex")) ? "Alex" : digits(a) === digits(phoneFor("sam")) ? "Sam" : null;
-      return who ? { sid: m.sid, who, text: (m.body || "").replace(/^Kimi \(Family HQ\):\s*/, ""), at: m.date_created || "" } : null;
-    })
-    .filter((x): x is GroupLine => !!x)
-    .reverse();
 }

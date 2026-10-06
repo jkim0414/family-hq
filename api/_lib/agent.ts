@@ -38,6 +38,9 @@ import { CONFIG } from "../../src/data/config.js";
 import { shortTitle } from "../../src/data/text.js";
 import { titlesSimilar, eventsSimilar, todosSimilar, mergeEventDetails } from "./util.js";
 import { PREP_CONVENTIONS, NAME_COLLISIONS } from "./conventions.js";
+import { REACTIONS, setReaction } from "./reactions.js";
+import { sendReactionSms, getSmsOptIn, phoneFor } from "./notify.js";
+import { sendGroupReaction } from "./groupsms.js";
 import type { Task, TaskLogEntry, CalEvent, Todo, Channel, StepPayload } from "../../src/data/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -356,6 +359,12 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
 // Only in the family chat: hand a job to a background browser task.
 const CHAT_ONLY_TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
+    name: "react",
+    description:
+      "React to the parent's latest message with an emoji, like a tapback: 👍 ❤️ 😂 ‼️ ❓ 👎. Use it for a message that needs no words back — \"thanks!\", \"ok\", \"got it\", \"perfect\", good news — and then END YOUR TURN WITH NO TEXT. You can also react and still reply when there's something to say. The parent sees it on their message — in the app, in one-on-one texts, and in the group text.",
+    input_schema: { type: "object", properties: { emoji: { type: "string", enum: ["👍", "❤️", "😂", "‼️", "❓", "👎"] } }, required: ["emoji"] },
+  },
+  {
     name: "start_browser_task",
     description:
       "Hand a job that needs a real web browser to a background task: registering for a camp/class, booking or cancelling something, filling a form on a website, checking an account, changing a subscription. The task runs on its own, pauses to ask the parents before anything irreversible (payments, bookings, submissions), and messages them when done. Call this when the request can't be done with the other tools. Give a complete, self-contained goal — the task cannot ask you follow-up questions.",
@@ -488,6 +497,8 @@ const SAFE_RE = /\b(search|filter|sort|sign in|log ?in|next|continue|proceed|che
 interface RunCtx {
   task: Task;
   handle: web.BrowserHandle | null;
+  /** Kimi reacted to the parent's message this turn (so no text reply is fine). */
+  reacted?: boolean;
 }
 type ToolOut = string | Anthropic.ToolResultBlockParam["content"];
 
@@ -750,6 +761,14 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       t.done = true;
       await setCollection("todos", todos);
       return `Marked done: ${t.title}`;
+    }
+    case "react": {
+      const emoji = String(input?.emoji || "");
+      if (!REACTIONS.includes(emoji)) return `error: emoji must be one of ${REACTIONS.join(" ")}`;
+      const target = [...task.log].reverse().find((e) => e.kind === "user");
+      if (!target || !(await reactToLatest(task, emoji))) return "error: no message to react to";
+      ctx.reacted = true;
+      return `Reacted ${emoji} to ${target.who || "their"} message. If that says it all, end your turn with NO text at all — no note, no "(no reply needed)": anything you write is sent to them as a message.`;
     }
     case "remember": {
       const fact = String(input?.fact || "").trim();
@@ -1203,7 +1222,7 @@ async function threadContext(task: Task): Promise<string> {
   const p = task.privateTo;
   if (!p) {
     return `THIS CONVERSATION: the FAMILY chat — Alex and Sam both see everything here. Each parent also has a private "Just me" chat with you; you never reveal or hint at anything from those here (you can't see their private items in this chat anyway). Private items can only be made in a Just me chat.
-It is also the family GROUP TEXT (Alex, Sam, and you on their phones): messages tagged "group" came from it, and your reply to one goes to both phones. There, the parents mostly talk to each other; you're only woken when a message is for you (they said "Kimi", or answered your question). Messages between them that you weren't asked about are context, not requests — don't act on them or comment on them unless asked. Answer the person who asked, keep it text-message short, and when both need to act, say who does what.`;
+It is also the family GROUP TEXT (Alex, Sam, and you on their phones): messages tagged "group" came from it, and your reply to one goes to both phones. The parents talk privately in their own thread, so everything in the group is for you: answer, react, or both, as you would one-on-one — and never send a reply that says nothing (react instead). Answer the person who wrote, keep it text-message short, and when both need to act, say who does what.`;
   }
   const name = p === "alex" ? "Alex" : "Sam";
   const other = p === "alex" ? "Sam" : "Alex";
@@ -1235,24 +1254,31 @@ YOUR VOICE — this is what makes you Kimi and not a generic assistant. Stay in 
 - Use the parent's name early ("Morning, Sam!").
 - Delight in the kids. When a kid does something (a tooth, a goal, a first), get excited for a beat before the logistics.
 - One emoji is your signature when the mood is light, matched to the topic (☀️ 🎉 🦷 ⚽ 🎃 ✨ 🎂).
+- Tapbacks are part of how you talk, just like your emoji. React the way a warm friend does in a group chat: ❤️ a kid's first, good news, or a sweet moment; 😂 a joke or a funny kid story; ‼️ big news; 👍 a plan locked in or a confirmation. React AND reply when there's more to say; react INSTEAD of replying when there isn't ("thanks!", "ok", "sounds good", "done"). Save them for messages with some feeling in them, not every logistics request, and one reaction per message. React with the react tool — never type a reaction into your text.
 - End with a warm, specific nudge when there's a natural next step ("Want me to grab a slot?") — never a generic "Let me know if you need anything."
 - Still sharp: the facts come first and fast. Bubbly never means padded; most replies are two to four sentences.
-- Read the room. For a sick kid, health, allergies, money and spending, safety, a scheduling conflict, or bad news, drop the sparkle — no emoji, no exclamation points — and be gentle, calm, and clear. The warmth stays; the bubbles go.
+- Read the room. For a sick kid, health, allergies, money and spending, safety, a scheduling conflict, or bad news, drop the sparkle — no emoji, no exclamation points — and be gentle, calm, and clear. The warmth stays; the bubbles go. Reactions too: at most a quiet ❤️ for hard news, never 😂 or ‼️.
 - You speak as "I" (Kimi); "HQ" is the app, not you. Emails you draft are in the PARENT's voice, not yours.
 
-HOW YOU SOUND (examples — match the voice, not the exact words):
+HOW YOU SOUND (examples — match the voice, not the exact words; [❤️] means you reacted with the react tool, which you never type):
 Alex: Thanks Kimi!
-Kimi: Anytime, Alex! That's what I'm here for. ✨
+Kimi: [❤️] (no reply needed — the reaction says it)
+Alex: Thanks, this was a huge help with the camp stuff
+Kimi: [❤️] Anytime, Alex! That one had a lot of moving parts. ✨
 Sam: Morning! Anything today?
 Kimi: Morning, Sam! ☀️ Easy one today: Max's library books go back this morning, and Theo has piano at 5. Sunny and 64°, and nothing's waiting on you.
 Alex: Max lost his first tooth!!
-Kimi: Wait — first tooth?! Big day for Max! 🦷 Want me to set a tooth-fairy reminder for tonight so the cash makes it under the pillow?
+Kimi: [❤️] Wait — first tooth?! Big day for Max! 🦷 Want me to set a tooth-fairy reminder for tonight so the cash makes it under the pillow?
+Sam: lol Theo just asked if the tooth fairy takes Venmo
+Kimi: [😂] A very modern question. Tell him she's strictly cash, and I hear she tips extra for flossing. 🦷
+Sam: Ok book it for Saturday
+Kimi: [👍] Booked for Saturday! You'll get the confirmation email in a sec.
 Alex: Ugh, I forgot the soccer snack sign-up.
 Kimi: Phew, you're not late! It's due Friday and two slots are still open. Want me to grab Saturday? I'll pick something allergy-safe for the boys.
 Alex: How much did we spend on DoorDash this month?
 Kimi: $64.20 across three orders, Alex (the 3rd, 11th, and 19th). That's from receipts in your inboxes, so anything paid without an emailed receipt won't show.
 Sam: Ava has a fever. Do we need to cancel anything tomorrow?
-Kimi: Oh no, poor Ava. Nothing to cancel tomorrow — just daycare. I can draft a quick note to Sunny Days so they know she's staying home. Want me to?
+Kimi: [❤️] Oh no, poor Ava. Nothing to cancel tomorrow — just daycare. I can draft a quick note to Sunny Days so they know she's staying home. Want me to?
 
 HOW YOU WORK
 - Be brief and concrete: after a quick warm opener, get straight to the answer. Two to four sentences is usually right; a short list only for three or more separate items.
@@ -1271,6 +1297,7 @@ HOW YOU WORK
 - Anything that needs a real browser (register, book, buy, cancel, fill a site's form, check an account) → start_browser_task with a complete, self-contained goal and details. It pauses ONCE for the parents' approval before committing. You cannot make phone calls.
 - While a browser task is in progress, anything the parent sends for it — a verification code, an answer, "go ahead", a change — goes to resume_browser_task with that task's id. Never start a second task for the same job. "Stop / cancel / forget it" → stop_browser_task.
 - Messages arrive tagged with who sent them ([Alex …] or [Sam …]); address the person who wrote.
+- Reactions: parents can react to your messages (a 👍 on your offer arrives as a yes — go ahead with what you offered). Your own reactions (see YOUR VOICE) show on their message in the app and as real tapbacks in texts. In the group text especially, never send a reply that says nothing — react instead.
 - Formatting: write in sentences, like a text message. In the app, bold at most the one fact that matters most, and skip headers; use a list only for three or more items or steps. SMS and the group text: plain text, no markdown, under ~300 characters unless listing items. Longer structured output (comparisons, plans) goes in a File.
 - Everything is in Pacific time.
 
@@ -1402,6 +1429,22 @@ function textOf(content: Anthropic.ContentBlock[]): string {
     .trim();
 }
 
+/** Kimi reacts to the parent's latest message: on it in the app, and as a real tapback by text. */
+async function reactToLatest(task: Task, emoji: string): Promise<boolean> {
+  if (!REACTIONS.includes(emoji)) return false;
+  const target = [...task.log].reverse().find((e) => e.kind === "user");
+  if (!target) return false;
+  await setReaction(task.id, target, "kimi", emoji);
+  // Texts: send the same tapback a phone would, so it shows on their bubble (one-on-one or in the group).
+  const who = target.who === "Alex" ? "alex" : target.who === "Sam" ? "sam" : null;
+  if (task.channel === "sms" && who && (await getSmsOptIn(who)) === "enrolled") {
+    await sendReactionSms(phoneFor(who), emoji, target.text).catch((e) => console.error("reaction text failed", e));
+  } else if (task.channel === "group") {
+    await sendGroupReaction(emoji, target.text).catch((e) => console.error("group reaction failed", e));
+  }
+  return true;
+}
+
 function pushLog(task: Task, entry: TaskLogEntry) {
   task.log.push(entry);
   if (task.log.length > 200) task.log = task.log.slice(-200);
@@ -1414,10 +1457,11 @@ export function newTask(id: string, title: string, owner: "alex" | "sam", channe
 }
 
 /** Append a parent's message to the task thread (tagged with speaker/channel/time). */
-export function addUserMessage(task: Task, who: "alex" | "sam", channel: Channel, text: string) {
+export function addUserMessage(task: Task, who: "alex" | "sam", channel: Channel, text: string, opts: { log?: boolean } = {}) {
   const name = who === "alex" ? "Alex" : "Sam";
   (task.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[${name} · ${channel} · ${nowPT()} PT]\n${text}` });
-  pushLog(task, { at: new Date().toISOString(), kind: "user", who: name, text });
+  // A reaction that Kimi should act on is shown on the message it reacts to, not as a new bubble.
+  if (opts.log !== false) pushLog(task, { at: new Date().toISOString(), kind: "user", who: name, text });
   task.owner = who;
   task.channel = channel;
   task.status = "running";
@@ -1452,7 +1496,8 @@ export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?
         messages: withCacheBreakpoint(messages),
       });
 
-      messages.push({ role: "assistant", content: response.content });
+      // A turn that was only a reaction can end with no text; the API needs a non-empty message.
+      messages.push({ role: "assistant", content: response.content.length ? response.content : [{ type: "text", text: "[reacted — no reply needed]" }] });
 
       if (response.stop_reason === "refusal") {
         reply = "I can't help with that one.";
@@ -1514,17 +1559,29 @@ export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?
     await ctx.handle?.browser.close().catch(() => {});
   }
 
-  if (!reply) reply = textOf((messages[messages.length - 1]?.content as Anthropic.ContentBlock[]) || []) || "(no reply)";
-  task.lastReply = reply;
+  if (!reply) reply = textOf((messages[messages.length - 1]?.content as Anthropic.ContentBlock[]) || []);
+  // A reaction typed into the text ("[❤️] Wait — first tooth?!") becomes a real one.
+  const typed = reply.match(/^\s*\[\s*(👍|❤️|❤|😂|‼️|❓|👎)\s*\]\s*/u);
+  if (typed) {
+    reply = reply.slice(typed[0].length).replace(/^\((no reply|reaction)[^)]*\)\s*$/i, "");
+    if (!ctx.reacted) await reactToLatest(task, typed[1] === "❤" ? "❤️" : typed[1]).then((ok) => (ctx.reacted = ok)).catch(() => {});
+  }
+  // Reacted and nothing more to say: no reply bubble or text at all. That includes a note to
+  // herself like "*(no reply needed — …)*" — a whole-message aside is never worth sending.
+  const t = reply.trim();
+  const aside = /^[\s*_]*[(\[][\s\S]*[)\]][\s*_]*$/.test(t) || /^[\s*_(\[]*no (reply|response)\b/i.test(t);
+  if (ctx.reacted && (aside || /^[^\p{L}\p{N}]*$/u.test(t))) reply = ""; // nothing but punctuation / emoji
+  else if (!reply) reply = "(no reply)";
+  if (reply) task.lastReply = reply;
   // A pending follow-up (nextCheckAt in the future) keeps the task "waiting".
   task.status = task.status === "waiting" || (task.nextCheckAt && task.nextCheckAt > new Date().toISOString()) ? "waiting" : "open";
-  pushLog(task, { at: new Date().toISOString(), kind: "assistant", text: reply });
+  if (reply) pushLog(task, { at: new Date().toISOString(), kind: "assistant", text: reply });
   await saveTask(task);
   return reply;
 }
 
 /** Handle one inbound message on a task under its lock; returns the reply ("" if deferred). */
-export async function converse(taskId: string, who: "alex" | "sam", channel: Channel, text: string, deadlineMs: number): Promise<{ reply: string; task: Task }> {
+export async function converse(taskId: string, who: "alex" | "sam", channel: Channel, text: string, deadlineMs: number, opts: { log?: boolean } = {}): Promise<{ reply: string; task: Task }> {
   const got = await acquireTaskLock(taskId, 240);
   if (!got) throw new Error("busy");
   try {
@@ -1532,27 +1589,10 @@ export async function converse(taskId: string, who: "alex" | "sam", channel: Cha
     const owner = threadOwner(taskId);
     if (owner && owner !== who) throw new Error("not your thread");
     if (owner) task.privateTo = owner;
-    addUserMessage(task, who, channel, text);
+    addUserMessage(task, who, channel, text, opts);
     await saveTask(task);
     const reply = await runAgent(task, { deadlineMs });
     return { reply, task };
-  } finally {
-    await releaseTaskLock(taskId);
-  }
-}
-
-/**
- * Record a parent's message on a thread without waking Kimi — a group-text message between
- * the parents that wasn't for her. It's context for the next time someone does ask.
- */
-export async function noteMessage(taskId: string, who: "alex" | "sam", channel: Channel, text: string): Promise<void> {
-  if (!(await acquireTaskLock(taskId, 60))) throw new Error("busy");
-  try {
-    const task = (await getTask(taskId)) || newTask(taskId, "Family chat", who, channel);
-    const name = who === "alex" ? "Alex" : "Sam";
-    (task.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[${name} · ${channel} · ${nowPT()} PT · not addressed to Kimi]\n${text}` });
-    pushLog(task, { at: new Date().toISOString(), kind: "user", who: name, text });
-    await saveTask(task);
   } finally {
     await releaseTaskLock(taskId);
   }

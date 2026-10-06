@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { KIDS } from "./data/kids";
 import { CONTACTS, PLACES, ROUTINES } from "./data/meta";
 import type { Comm, Contact, CalEvent, Kid, Place, Routine, Todo, Suggestion, HouseholdProfile, Action, AuditEntry, Purchase, Schedule } from "./data/types";
@@ -49,6 +49,9 @@ function readCache(): AppState | null {
 }
 
 type EditableCollection = "events" | "todos" | "kids" | "contacts" | "places" | "routines";
+type UndoableCollection = "events" | "todos" | "schedules";
+type PendingDelete = { collection: UndoableCollection; id: string; title: string; timer: number };
+const UNDO_MS = 5000;
 
 type Authed = "unknown" | "yes" | "no";
 
@@ -61,6 +64,8 @@ interface DataCtx {
   logout: () => Promise<void>;
   toggleTodo: (id: string, done: boolean) => void;
   mutate: (collection: EditableCollection, op: "upsert" | "delete", item: { id: string } & Record<string, unknown>) => Promise<void>;
+  /** Delete with a 5-second Undo (swipe to delete): hidden at once, removed for real when the toast ends. */
+  removeWithUndo: (collection: UndoableCollection, item: { id: string; title?: string }) => void;
   capture: (text: string, images?: { mediaType: string; data: string }[]) => Promise<any>;
   suggestion: (id: string, action: "apply" | "dismiss") => Promise<void>;
   decideAction: (id: string, decision: "approve" | "decline") => Promise<void>;
@@ -196,6 +201,56 @@ export function DataProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  // ── Swipe to delete, with Undo ────────────────────────────────────────────
+  // The item disappears at once; the real delete (which for an event also removes it from Google
+  // Calendar) waits until the Undo toast is gone. Leaving the app sends any waiting deletes.
+  const [pending, setPending] = useState<PendingDelete[]>([]);
+  const pendingRef = useRef<PendingDelete[]>([]);
+  pendingRef.current = pending;
+
+  function commitDelete(p: PendingDelete, keepalive = false) {
+    window.clearTimeout(p.timer);
+    const req =
+      p.collection === "schedules"
+        ? fetch("/api/schedules", { method: "POST", keepalive, headers: { "content-type": "application/json" }, body: JSON.stringify({ id: p.id, cancel: true }) })
+        : fetch("/api/mutate", { method: "POST", keepalive, headers: { "content-type": "application/json" }, body: JSON.stringify({ op: "delete", collection: p.collection, id: p.id, item: { id: p.id } }) });
+    return req
+      .catch(() => {})
+      .then(() => (keepalive ? undefined : reloadAfterWrite()))
+      .finally(() => setPending((xs) => xs.filter((x) => x.id !== p.id)));
+  }
+
+  function removeWithUndo(collection: UndoableCollection, item: { id: string; title?: string }) {
+    const p: PendingDelete = { collection, id: item.id, title: item.title || "item", timer: 0 };
+    p.timer = window.setTimeout(() => commitDelete(p), UNDO_MS);
+    setPending((xs) => [...xs.filter((x) => x.id !== item.id), p]);
+  }
+
+  function undoDelete(id: string) {
+    const p = pendingRef.current.find((x) => x.id === id);
+    if (p) window.clearTimeout(p.timer);
+    setPending((xs) => xs.filter((x) => x.id !== id));
+  }
+
+  useEffect(() => {
+    const flush = () => pendingRef.current.forEach((p) => commitDelete(p, true));
+    const onHide = () => document.visibilityState === "hidden" && flush();
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, []);
+
+  // What the app sees: everything except items waiting out their Undo.
+  const visible = useMemo(() => {
+    if (!pending.length) return data;
+    const gone = new Set(pending.map((p) => p.id));
+    return { ...data, todos: data.todos.filter((x) => !gone.has(x.id)), events: data.events.filter((x) => !gone.has(x.id)), schedules: data.schedules.filter((x) => !gone.has(x.id)) };
+  }, [data, pending]);
+  const last = pending[pending.length - 1];
+
   async function capture(text: string, images?: { mediaType: string; data: string }[]) {
     let result: any = {};
     try {
@@ -276,9 +331,21 @@ export function DataProvider({ children }: { children: ReactNode }) {
 
   return (
     <Ctx.Provider
-      value={{ data, loading, source, authed, requestLogin, logout, toggleTodo, mutate, capture, suggestion, decideAction, saveProfile, refresh: () => load(true) }}
+      value={{ data: visible, loading, source, authed, requestLogin, logout, toggleTodo, mutate, removeWithUndo, capture, suggestion, decideAction, saveProfile, refresh: () => load(true) }}
     >
       {children}
+      {last && (
+        <div role="status" className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-50 flex justify-center px-4 md:bottom-8">
+          <div className="flex max-w-md items-center gap-3 rounded-full bg-ink px-4 py-2.5 text-sm text-surface shadow-lg">
+            <span className="min-w-0 truncate">
+              {last.collection === "schedules" ? "Cancelled" : "Deleted"} “{last.title}”
+            </span>
+            <button type="button" onClick={() => undoDelete(last.id)} className="shrink-0 font-bold text-surface underline underline-offset-2">
+              Undo
+            </button>
+          </div>
+        </div>
+      )}
     </Ctx.Provider>
   );
 }

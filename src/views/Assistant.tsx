@@ -53,7 +53,10 @@ export default function Assistant() {
       <section>
         <Card>
           <div className="flex items-center justify-between px-4 py-3">
-            <div className="text-[15px] text-ink">This device</div>
+            <div>
+              <div className="text-[15px] text-ink">This device</div>
+              <div className="text-xs text-ink-3">Version {__BUILD__}</div>
+            </div>
             <Button variant="ghost" size="sm" onClick={() => logout()}>
               Log out
             </Button>

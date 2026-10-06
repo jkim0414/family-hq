@@ -4,7 +4,10 @@ import { Button, Icon, KimiAvatar } from "../components/ui";
 import { Markdown } from "../components/Markdown";
 import { encodeFiles, isAttachable, MAX_ATTACHMENTS, type Att } from "../attachments";
 import { fmtDateTime } from "../store";
-import type { TaskLogEntry, TaskStatus, Action, EmailPayload, StepPayload } from "../data/types";
+import type { TaskLogEntry, TaskStatus, Action, EmailPayload, StepPayload, Reaction } from "../data/types";
+
+const REACTIONS = ["👍", "❤️", "😂", "‼️", "❓", "👎"];
+const who = (by: Reaction["by"]) => (by === "kimi" ? "Kimi" : by === "alex" ? "Alex" : "Sam");
 
 // The one place to tell Kimi anything. Text goes to her; a photo or
 // PDF is filed straight away and she replies with what she did. Everything she
@@ -97,6 +100,46 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
   const [text, setText] = useState("");
   const [atts, setAtts] = useState<Att[]>([]);
   const [busy, setBusy] = useState(false);
+  const [me, setMe] = useState<string>("");
+  // Reactions: press and hold (or right-click) a message to open the bar.
+  const [picker, setPicker] = useState<string | null>(null);
+  const hold = useRef<number | null>(null);
+  // Press-and-hold is for touch screens only; with a mouse, holding the button is how you
+  // select text, so on desktop only a right-click opens the bar.
+  const holdAt = useRef<{ x: number; y: number } | null>(null);
+  const holdStart = (k: string, ev: React.PointerEvent) => {
+    if (ev.pointerType === "mouse") return;
+    if (hold.current) clearTimeout(hold.current);
+    holdAt.current = { x: ev.clientX, y: ev.clientY };
+    hold.current = window.setTimeout(() => setPicker(k), 420);
+  };
+  const holdMove = (ev: React.PointerEvent) => {
+    // A finger that moves is scrolling, not holding.
+    const a = holdAt.current;
+    if (a && Math.hypot(ev.clientX - a.x, ev.clientY - a.y) > 8) holdEnd();
+  };
+  const holdEnd = () => {
+    if (hold.current) clearTimeout(hold.current);
+    hold.current = null;
+  };
+  const react = async (e: TaskLogEntry, emoji: string) => {
+    setPicker(null);
+    if (!me) return;
+    // Show it right away (same emoji again removes it, like a tapback); the server confirms on the next poll.
+    const toggle = (xs: Reaction[] = []) => {
+      const mine = xs.find((r) => r.by === me);
+      const rest = xs.filter((r) => r.by !== me);
+      return mine?.emoji === emoji ? rest : [...rest, { by: me as Reaction["by"], emoji, at: new Date().toISOString() }];
+    };
+    setLog((l) => l.map((x) => (x.at === e.at && x.kind === e.kind ? { ...x, reactions: toggle(x.reactions) } : x)));
+    try {
+      const r = await fetch("/api/tasks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ thread, react: { at: e.at, kind: e.kind, emoji } }) });
+      if (r.ok && (await r.json()).state === "replying") setStatus("running");
+    } catch {
+      /* the next poll shows the real state */
+    }
+    load(true);
+  };
   const [note, setNote] = useState<{ text: string; kind: "error" | "info" } | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -117,7 +160,7 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
     const t = await get("/api/tasks");
     if (!t) return;
     const list: (TaskRow & { updatedAt: string })[] = t.tasks || [];
-    const next = list.map((x) => `${x.id}:${x.updatedAt}:${x.status}`).sort().join("|");
+    const next = list.map((x) => `${x.id}:${x.updatedAt}:${x.status}`).sort().join("|") + `|r${t.reactionsVer || 0}`;
     const browserTasks = list.filter((x) => x.kind === "browser" && inThread(x));
     setTasks(browserTasks);
     if (cacheByThread[thread]) cacheByThread[thread]!.tasks = browserTasks;
@@ -126,6 +169,7 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
     if (!m) return;
     // A private thread doesn't exist until its first message: show it empty, not loading.
     const tlog: TaskLogEntry[] = m.task?.log || [];
+    if (m.me) setMe(m.me);
     const tstatus: TaskStatus | null = m.task?.status ?? null;
     const tfiles: FileRow[] = f ? (f.files || []).filter(inThread) : cacheByThread[thread]?.files || [];
     sig.current = next;
@@ -298,13 +342,67 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
           if (row.kind === "msg") {
             const e = row.entry;
             const mine = e.kind === "user";
+            const k = `${e.at}|${e.kind}`;
+            const rx = e.reactions || [];
+            const myEmoji = rx.find((r) => r.by === me)?.emoji;
             return (
-              <div key={i} className={`flex items-end gap-2 ${mine ? "justify-end" : "justify-start"}`}>
+              <div key={i} className={`relative flex items-end gap-2 ${mine ? "justify-end" : "justify-start"} ${rx.length ? "pb-3" : ""}`}>
                 {!mine && <KimiAvatar size={26} className="mb-0.5" />}
-                <div className={`max-w-[85%] break-words rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${mine ? "whitespace-pre-wrap bg-accent text-white" : "bg-surface text-ink shadow-sm ring-1 ring-line"}`}>
+                <div
+                  className={`relative max-w-[85%] break-words rounded-2xl px-3.5 py-2 text-sm leading-relaxed [@media(pointer:coarse)]:select-none [@media(pointer:coarse)]:[-webkit-touch-callout:none] ${mine ? "whitespace-pre-wrap bg-accent text-white" : "bg-surface text-ink shadow-sm ring-1 ring-line"}`}
+                  onPointerDown={(ev) => holdStart(k, ev)}
+                  onPointerMove={holdMove}
+                  onPointerUp={holdEnd}
+                  onPointerLeave={holdEnd}
+                  onPointerCancel={holdEnd}
+                  onContextMenu={(ev) => {
+                    ev.preventDefault();
+                    setPicker(k);
+                  }}
+                >
                   {mine && e.who && e.who !== "You" && <div className="mb-0.5 text-[10px] font-semibold opacity-70">{e.who}</div>}
                   {mine ? e.text : <Markdown text={e.text} />}
+                  {rx.length > 0 && (
+                    <div
+                      className={`absolute -bottom-3 z-10 ${mine ? "left-2" : "right-2"} flex items-center gap-0.5 rounded-full bg-surface px-1.5 py-0.5 text-[13px] leading-none shadow-sm ring-1 ring-line`}
+                      title={rx.map((r) => `${who(r.by)} ${r.emoji}`).join(" · ")}
+                    >
+                      {rx.map((r) => (
+                        <span key={r.by}>{r.emoji}</span>
+                      ))}
+                      {rx.length > 1 && <span className="ml-0.5 text-[10px] font-semibold text-ink-3">{rx.length}</span>}
+                    </div>
+                  )}
                 </div>
+                {picker === k && (
+                  <>
+                    <div className="fixed inset-0 z-30" onClick={() => setPicker(null)} />
+                    <div className={`absolute -top-11 z-40 flex items-center gap-0.5 rounded-full bg-surface p-1 shadow-lg ring-1 ring-line ${mine ? "right-0" : "left-8"}`} role="menu" aria-label="React">
+                      {REACTIONS.map((emo) => (
+                        <button
+                          key={emo}
+                          type="button"
+                          role="menuitem"
+                          aria-label={`React ${emo}`}
+                          onClick={() => react(e, emo)}
+                          className={`flex h-9 w-9 items-center justify-center rounded-full text-[19px] ${myEmoji === emo ? "bg-accent/15" : "active:bg-fill"}`}
+                        >
+                          {emo}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(e.text).catch(() => {});
+                          setPicker(null);
+                        }}
+                        className="ml-0.5 rounded-full px-2.5 py-1.5 text-[12px] font-semibold text-ink-2 active:bg-fill"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             );
           }

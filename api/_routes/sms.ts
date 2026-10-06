@@ -7,6 +7,8 @@ import { converse, appendExchange } from "../_lib/agent.js";
 import { privateThreadId } from "../_lib/privacy.js";
 import { runCapture, describeCapture } from "../_lib/capture.js";
 import { latestPending, decideAction } from "../_lib/actions.js";
+import { parseReactionText } from "../_lib/reactions.js";
+import { handleReaction } from "../_lib/tapbacks.js";
 
 // POST /api/sms — Twilio inbound-message webhook for one-on-one texts. Each parent's texts
 // land on their private "Just me" thread and the reply is texted back. (The family group
@@ -92,6 +94,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return twiml(res); // not confirmed yet — send nothing else
   }
   if (state !== "enrolled") return twiml(res); // never opted in, or opted out
+
+  // A tapback on one of Kimi's texts arrives as `Liked “…”`: put it on that message. Quiet,
+  // unless it's a 👍 on her latest offer — then she takes it as a yes.
+  const tap = parseReactionText(text);
+  if (tap) {
+    waitUntil(
+      (async () => {
+        try {
+          const { reply } = await handleReaction(privateThreadId(who), who, "sms", tap);
+          if (reply) await sendSms(from, reply);
+        } catch (e) {
+          console.error("sms reaction failed", e);
+        }
+      })()
+    );
+    return twiml(res);
+  }
 
   // A photo or PDF: file it (like an attachment in the app) and text back what was filed.
   if (Number(body.NumMedia || 0) > 0) {

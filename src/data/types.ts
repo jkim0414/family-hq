@@ -263,6 +263,15 @@ export interface TaskLogEntry {
   kind: "user" | "assistant" | "tool" | "system";
   who?: string; // speaker name for user entries
   text: string;
+  /** Tapback-style reactions (from the app, or a phone's "Liked “…”" text). Merged in when served. */
+  reactions?: Reaction[];
+}
+
+/** One person's reaction to a chat message (one per person per message). */
+export interface Reaction {
+  by: "alex" | "sam" | "kimi";
+  emoji: string;
+  at: string;
 }
 
 // ── Actions: anything that touches the outside world (approve-by-default) ────

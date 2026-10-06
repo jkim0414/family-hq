@@ -2,11 +2,13 @@ import { useState } from "react";
 import { useData } from "../dataStore";
 import { describe } from "../data/schedule";
 import { Card, Collapsible, TextAction, PrivateTag } from "./ui";
+import { Swipeable } from "./Swipeable";
 
 // Scheduled and recurring tasks Kimi will run ("every last day of the month…"),
-// with who gets the result and a way to cancel. Set up by asking Kimi in Chat.
+// with who gets the result and a way to cancel (the button, or swipe left — with Undo).
+// Set up by asking Kimi in Chat.
 export function ScheduledList() {
-  const { data, refresh } = useData();
+  const { data, refresh, removeWithUndo } = useData();
   const [cancelled, setCancelled] = useState<string[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const rows = (data.schedules || [])
@@ -32,22 +34,31 @@ export function ScheduledList() {
       ) : (
         <Card className="divide-y divide-line">
           {rows.map((s) => (
-            <div key={s.id} className="px-4 py-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0 text-sm font-semibold text-ink">{s.title}{s.privateTo && <PrivateTag className="ml-1.5" />}</div>
-                <TextAction onClick={() => cancel(s.id, s.title)} disabled={busy === s.id}>
-                  {busy === s.id ? "Cancelling…" : "Cancel"}
-                </TextAction>
+            <Swipeable key={s.id} label="Cancel" onDelete={() => removeWithUndo("schedules", s)}>
+              <div className="px-4 py-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 text-sm font-semibold text-ink">{s.title}{s.privateTo && <PrivateTag className="ml-1.5" />}</div>
+                  <TextAction onClick={() => cancel(s.id, s.title)} disabled={busy === s.id}>
+                    {busy === s.id ? "Cancelling…" : "Cancel"}
+                  </TextAction>
+                </div>
+                <div className="mt-0.5 text-xs text-ink-2">{describe(s)}</div>
+                <div className="mt-0.5 text-xs text-ink-3">
+                  Next:{" "}
+                  {s.nextRunAt
+                    ? new Date(s.nextRunAt).toLocaleString("en-US", {
+                        timeZone: "America/Los_Angeles",
+                        weekday: "short",
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                      })
+                    : "—"}{" "}
+                  · for {s.notify === "both" ? "Alex & Sam" : s.owner === "alex" ? "Alex" : "Sam"}
+                </div>
               </div>
-              <div className="mt-0.5 text-xs text-ink-2">{describe(s)}</div>
-              <div className="mt-0.5 text-xs text-ink-3">
-                Next:{" "}
-                {s.nextRunAt
-                  ? new Date(s.nextRunAt).toLocaleString("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
-                  : "—"}{" "}
-                · for {s.notify === "both" ? "Alex & Sam" : s.owner === "alex" ? "Alex" : "Sam"}
-              </div>
-            </div>
+            </Swipeable>
           ))}
         </Card>
       )}

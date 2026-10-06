@@ -27,9 +27,15 @@ Theo, and Ava) is fictional.
   a gift idea, a purchase) and is then visible only to that parent: never in the family chat,
   the other parent's app, the digests, or the shared calendar.
 - **A family group text.** Once both parents opt in to texts, Kimi starts a group text with
-  them from her own number, and it mirrors into the family chat. She answers when named, or
-  when a model reading the recent messages judges a message is for her (a follow-up on her
-  plan, a question she can answer), and stays quiet when the parents are talking to each other.
+  them from her own number. It's a thread *with* Kimi (the parents talk privately in their
+  own), so every message goes to her and mirrors into the family chat: she answers, reacts, or
+  both, and every photo or PDF is filed — even when a photo and its note arrive as separate texts.
+- **Reactions.** Press and hold a message for 👍 ❤️ 😂 ‼️ ❓ 👎. A tapback on one of Kimi's texts
+  lands on that message instead of getting a reply, and a 👍 on her latest offer counts as a yes
+  (never as an approval). She reacts too, as part of her voice; by text she sends the iPhone
+  tapback form (curly quotes, smart encoding off), which shows as a real tapback.
+- **Swipe to delete.** On a phone, swipe a to-do or event left (a scheduled task: to cancel),
+  with a 5-second Undo before anything is actually deleted.
 - **Scheduled and recurring tasks.** "Check on the RSVP next Tuesday", "every last day of the
   month, recap our spending": Kimi runs them on time and reports to whoever asked.
 - **Plans around work.** Both parents' work calendars are read as private context — never
@@ -115,7 +121,7 @@ curl, `browser-e2e.ts` tests the approval loop against a local Chromium, `guard-
 exercises the safety check, `card-fill-check.ts` tests card filling with Stripe's test card,
 `redis-count.ts` counts Redis commands per cron tick, `cache-check.ts` measures prompt
 caching, `schedule-check.ts` tests the recurrence rules, `privacy-check.ts` tests private
-threads, `group-triage-check.ts` tests when Kimi speaks up in the group text,
+threads, `reaction-parse-check.ts` and `react-behavior-check.ts` test tapbacks and when Kimi reacts,
 `persona-check.ts` is a blind A/B of her voice, and `demo/screenshots.ts` renders the app
 with fake data. `npm run typecheck` also fails on relative imports without `.js` (they
 break Node ESM on Vercel).

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { dateLabel, displayDate, eventTimeRange, fmtDate, SOURCE_LABEL } from "../store";
 import { htmlToText } from "../data/text";
 import { Card, WhoChips, Button, EditButton, PrivateTag } from "./ui";
+import { Swipeable } from "./Swipeable";
+import { useData } from "../dataStore";
 import { peopleOf, ownerOf } from "../data/people";
 import { toHomeZone, fmt12 } from "../data/tz";
 import type { CalEvent } from "../data/types";
@@ -18,15 +20,17 @@ function leaveBy(e: CalEvent): string | null {
 
 // Consistent event card used on Home + Agenda. Tap to expand it (read-only:
 // full notes, location, who, where it came from) with an Edit button; the
-// pencil jumps straight to editing. Dates/times render in the home zone (PT).
+// pencil jumps straight to editing; swiping left deletes it (with Undo, and from Google
+// Calendar too) where the card is editable. Dates/times render in the home zone (PT).
 export function EventCard({ e, onEdit, showDate = true }: { e: CalEvent; onEdit?: () => void; showDate?: boolean }) {
+  const { removeWithUndo } = useData();
   const [open, setOpen] = useState(false);
   const timeStr = eventTimeRange(e);
   const notes = htmlToText(e.prep);
   const who = peopleOf(e).length > 0 || ownerOf(e).length > 0;
   const drive = leaveBy(e);
 
-  return (
+  const card = (
     <Card className="overflow-hidden">
       <div className="flex items-start">
         <button type="button" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="min-w-0 flex-1 py-3 pl-4 pr-1 text-left">
@@ -92,6 +96,7 @@ export function EventCard({ e, onEdit, showDate = true }: { e: CalEvent; onEdit?
       )}
     </Card>
   );
+  return onEdit ? <Swipeable className="rounded-2xl" onDelete={() => removeWithUndo("events", e)}>{card}</Swipeable> : card;
 }
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {

@@ -2,16 +2,20 @@ import { useState } from "react";
 import type { Todo } from "../data/types";
 import { dateLabel, daysUntil, fmtDate, isTodoUrgent, SOURCE_LABEL } from "../store";
 import { WhoChips, Button, EditButton, PrivateTag } from "./ui";
+import { Swipeable } from "./Swipeable";
+import { useData } from "../dataStore";
 import { peopleOf, ownerOf } from "../data/people";
 
 // One to-do row. The checkbox completes it; tapping the text expands it
-// (read-only) with Mark done / Edit; the pencil jumps straight to editing.
+// (read-only) with Mark done / Edit; the pencil jumps straight to editing;
+// swiping left deletes it (with Undo) — for to-dos you'd rather drop than complete.
 export function TodoItem({
   todo,
   done,
   onToggle,
   onEdit,
   showDue = true,
+  swipe = true,
 }: {
   todo: Todo;
   done: boolean;
@@ -19,12 +23,15 @@ export function TodoItem({
   onEdit?: () => void;
   /** Hide the due label when the surrounding section already says which day it is. */
   showDue?: boolean;
+  /** Swipe left to delete (default on). */
+  swipe?: boolean;
 }) {
+  const { removeWithUndo } = useData();
   const [open, setOpen] = useState(false);
   const overdue = todo.due ? daysUntil(todo.due) < 0 && !done : false;
   const who = peopleOf(todo).length > 0 || ownerOf(todo).length > 0;
 
-  return (
+  const row = (
     <div>
       <div className="flex items-start gap-1 px-3 py-2">
         <label className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center">
@@ -89,4 +96,5 @@ export function TodoItem({
       )}
     </div>
   );
+  return swipe ? <Swipeable onDelete={() => removeWithUndo("todos", todo)}>{row}</Swipeable> : row;
 }

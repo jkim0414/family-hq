@@ -145,12 +145,15 @@ EVENTS vs TO-DOS (important — keep the calendar uncluttered):
 
 RULES:
 - Default to fyi unless there is a real action or a real date.
+- NEWSLETTERS AND DIGESTS BURY REAL EVENTS. Read every paragraph of a teacher post, digest, or newsletter: any dated thing the kids take part in (a parade, performance, field trip, spirit or dress-up day, picture day, class party, early dismissal) is an event to file even when the rest of the post is chit-chat, and even when details are "still being finalized" — file it all-day with what's known (never invent a time the message doesn't give), put the dress/bring rules in "prep", and note that details are to come. A message that announces such an event is category "calendar", not "fyi".
+- SCHOOL FUNDRAISER DINE-OUT NIGHTS (restaurant giveback or spirit nights) are events the family wants on the calendar: file each with the restaurant name, address (from the flyer if attached), and hours, and put how the donation counts (show the flyer, promo code, order online) in "prep".
 - Extract events with concrete dates only; resolve relative dates ("this Friday", "tomorrow") against the item's received date (provided). Output YYYY-MM-DD.
 - FLIGHTS: model a flight as ONE timed event spanning departure→arrival. date + start = the DEPARTURE date/time; end = the ARRIVAL time; endDate = the arrival date ONLY if it lands on a different day (red-eye). Set startTz to the DEPARTURE airport's IANA zone and endTz to the ARRIVAL airport's IANA zone (e.g. LAX → "America/Los_Angeles", EWR/JFK → "America/New_York", ORD → "America/Chicago", DEN → "America/Denver", SEA → "America/Los_Angeles"). Put the flight number in the title or location. This makes the calendar show true block time across zones. A round-trip itinerary = TWO separate flight events (outbound + return). Example: "UA 100 ORD 9:15 AM → BOS 12:40 PM, Jun 19" → {date:"2026-06-19", start:"09:15", end:"12:40", startTz:"America/Chicago", endTz:"America/New_York", title:"Depart for Boston — UA 100", location:"ORD → BOS"}.
 - For any non-flight event whose stated times are in a timezone other than Pacific, set startTz (and endTz if different) accordingly; otherwise omit them (defaults to Pacific).
 - "prep" on an event = what to bring/wear/prepare. todos: priority=high when time-sensitive or alert; set a due date when there is one. Do NOT restate the due date inside the todo's title/detail — it's shown separately.
 - PREP TIMING: a to-do that gets something ready for a dated thing (buy/get/order/make/pack/wrap/print/sign …) is due BEFORE that date, never on it — the kids need it in hand that morning. Default to the day before; give 2–3 days when it must be bought or ordered, and if the day before is a Sunday/holiday, prefer the last practical shopping day. Only the act of BRINGING/turning it in is due on the day itself, and that's usually covered by the event's "prep" note rather than a separate to-do.
 - ALREADY KNOWN: the message may include "EXISTING EVENTS" and "OPEN TO-DOS" lists. Different emails often describe the SAME thing (a school digest, a room parent's reminder, a calendar entry). If the input is about something already listed, do NOT create it again: for an event, emit "updates" with the existing id (an empty "set" is fine if nothing changed — it links this message to that event); for a to-do, simply omit it unless the existing one lacks something essential. Only create new items for genuinely new things.
+  "The same thing" is strict: the SAME date, the SAME activity, and the same organizer or place (the class spring concert is not the district music festival that evening, even on the same date with a similar theme). A prep to-do ("costumes", "buy a gift") never stands in for its event — the event itself must be on the calendar. When the message announces a dated event and no listed event is clearly that one, CREATE it; a near-duplicate is caught downstream, a missing event is not. Never decide something is "already on the calendar" unless you can point to its line (id) in EXISTING EVENTS — and then emit it in "updates" with that id.
 - Coverage notes ("Sam has all drop-offs/pickups Tuesday") → one calendar event for the coverage. Keep light.
 - CONTEXT IS NOT A SEPARATE ITEM: when one part of a note only exists to EXPLAIN another, produce a SINGLE item for the actionable/coverage thing and fold the background into its detail — do not spin the context into its own event. E.g. "Alex is at an offsite Tue 9–5, so Sam has all drop-offs/pickups" → ONE event ("Sam: all drop-offs & pickups", owner ["sam"], detail noting Alex is at an offsite) — do NOT also create a "Alex offsite" event. Only give the context its own event if it independently needs to be on the calendar (e.g. the family must plan around it).
 - summary: one concise sentence a parent can read at a glance. reason: one sentence on the category choice.
@@ -190,8 +193,8 @@ const TOOL: Anthropic.Tool = {
           properties: {
             title: { type: "string" },
             date: { type: "string", description: "YYYY-MM-DD — start/departure date" },
-            allDay: { type: "boolean" },
-            start: { type: "string", description: "HH:mm local to startTz, optional" },
+            allDay: { type: "boolean", description: "true when the message gives no start time" },
+            start: { type: "string", description: "HH:mm local to startTz — ONLY a time the message (or a linked page) actually states. Never guess one; if none is given, omit it and set allDay=true." },
             end: { type: "string", description: "HH:mm local to endTz, optional. For a flight, the arrival time." },
             endDate: {
               type: "string",
@@ -382,7 +385,33 @@ ${input.text}${note}`,
   c.updates ||= [];
   c.deletes ||= [];
   c.metadata ||= [];
+  // A time the message never states is a guess (a model will invent "10:00" for an event with no
+  // time given): drop it and keep the event all-day. Skipped when attachments carry the details.
+  if (!atts.length) {
+    const said = `${input.subject}\n${input.text}`;
+    for (const e of c.events) {
+      if (e.start && !timeStated(said, e.start)) {
+        delete e.start;
+        delete e.end;
+        e.allDay = true;
+      }
+    }
+  }
   return c;
+}
+
+/** Is this HH:mm time actually written in the text? ("10:00", "10am", "10 a.m.", "at 10", "9–10am", "noon") */
+export function timeStated(text: string, hhmm: string): boolean {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return false;
+  const t = text.toLowerCase();
+  const h12 = ((h + 11) % 12) + 1;
+  const mm = String(m).padStart(2, "0");
+  if (h === 12 && m === 0 && /\bnoon\b/.test(t)) return true;
+  const ampm = "(a\\.?m\\.?|p\\.?m\\.?)";
+  const pats = [`\\b${h12}:${mm}\\b`, `\\b${String(h).padStart(2, "0")}:${mm}\\b`, `\\b${h12}\\.${mm}\\s*${ampm}`];
+  if (m === 0) pats.push(`\\b${h12}\\s*${ampm}`, `\\b${h12}\\s*o'?clock`, `\\bat ${h12}\\b`, `\\b${h12}\\s*[-–—]\\s*\\d{1,2}(:\\d\\d)?\\s*${ampm}`);
+  return pats.some((p) => new RegExp(p).test(t));
 }
 
 const VERIFY_TOOL: Anthropic.Tool = {

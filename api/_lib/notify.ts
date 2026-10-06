@@ -90,6 +90,34 @@ export async function sendSms(to: string, rawBody: string, mediaUrl?: string): P
   if (!res.ok) throw new Error(`Twilio ${res.status}: ${(await res.text()).slice(0, 200)}`);
 }
 
+// iPhones turn a text in exactly this form into a tapback on the quoted message — with curly
+// quotes, so smart encoding (which straightens them) must be off. Tested on iOS.
+const TAPBACK_VERB: Record<string, string> = { "👍": "Liked", "❤️": "Loved", "😂": "Laughed at", "‼️": "Emphasized", "❓": "Questioned", "👎": "Disliked" };
+
+/** The text a phone sends for a tapback: `Liked “<their message>”` (null for an emoji iPhones can't show). */
+export function tapbackText(emoji: string, quoted: string): string | null {
+  const verb = TAPBACK_VERB[emoji];
+  if (!verb) return null;
+  const q = quoted.trim().length > 300 ? quoted.trim().slice(0, 299) + "…" : quoted.trim();
+  return `${verb} “${q}”`;
+}
+
+/** Kimi reacts to a parent's text the way a phone does: `Liked “<their message>”`. */
+export async function sendReactionSms(to: string, emoji: string, quoted: string): Promise<void> {
+  const body = tapbackText(emoji, quoted);
+  if (!body || !smsConfigured()) return;
+  const sid = process.env.TWILIO_ACCOUNT_SID!;
+  const form = new URLSearchParams({ To: to, Body: body, SmartEncoded: "false" });
+  if (process.env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", process.env.TWILIO_MESSAGING_SERVICE_SID);
+  else form.set("From", process.env.TWILIO_FROM!);
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+    method: "POST",
+    headers: { authorization: `Basic ${Buffer.from(`${sid}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}`, "content-type": "application/x-www-form-urlencoded" },
+    body: form,
+  });
+  if (!res.ok) throw new Error(`Twilio ${res.status}: ${(await res.text()).slice(0, 200)}`);
+}
+
 /** Deliver a proactive assistant message to a parent on their channel. */
 export async function notify(userId: "alex" | "sam", text: string, channel: Channel, opts: { emailFallback?: boolean } = {}): Promise<void> {
   const u = userById(userId);

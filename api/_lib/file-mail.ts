@@ -3,12 +3,13 @@ import { appendItems, getCollection, getProfile } from "./db.js";
 import { createCalendarEvent, updateCalendarEvent } from "./calendar.js";
 import { eventsSimilar, commsDuplicate, mergeEventDetails, todosSimilar, adjustPrepDue } from "./util.js";
 import { CONFIG } from "../../src/data/config.js";
+import { KIDS } from "../../src/data/kids.js";
 
 const todayLocal = () => new Intl.DateTimeFormat("en-CA", { timeZone: CONFIG.calendar.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 import { applyMetadata } from "./metadata.js";
 import { sendEmail } from "./email.js";
 import type { RawMessage } from "./imap.js";
-import { extractLinks, fetchLinkedPages } from "./links.js";
+import { extractLinks, fetchLinkedPages, fetchLinkedPdfs } from "./links.js";
 import { completePartyPrep } from "./conventions.js";
 import { closeIfAlreadyDone } from "./verify.js";
 import type { CalEvent, Comm, Todo } from "../../src/data/types";
@@ -34,6 +35,23 @@ export interface FileStats {
   metaApplied: number;
   metaSuggested: number;
   processedKeys: string[];
+}
+
+// Words that don't identify an event: the family's names and generic event words.
+const GENERIC = new Set(
+  [
+    ...Object.values(CONFIG.parents).map((p) => p.name.split(" ")[0]),
+    ...KIDS.map((k) => k.firstName),
+    "the", "and", "with", "for", "from", "day", "night", "dinner", "lunch", "breakfast", "party", "school", "event",
+    "meeting", "class", "kids", "boys", "girls", "family", "plus", "home", "away", "game", "today", "2026", "2027",
+  ].map((w) => w.toLowerCase())
+);
+
+/** Does the message mention this event — some distinctive word of its title appears in it? */
+export function mentionsEvent(text: string, title: string): boolean {
+  const t = text.toLowerCase();
+  const words = title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !GENERIC.has(w));
+  return words.some((w) => t.includes(w));
 }
 
 const MAILBOX_LABEL = { school: "Forwarded to the school inbox", alex: "Alex's own Gmail (watched)", sam: "Sam's own Gmail (watched)" };
@@ -72,13 +90,14 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   for (const m of messages) {
     // Details are often behind a link ("RSVP here", a Google Doc, an Evite) —
     // follow the promising ones and give the classifier the page text too.
-    const linked = await fetchLinkedPages(m.links ?? extractLinks(m.text)).catch(() => "");
+    const links = m.links ?? extractLinks(m.text);
+    const [linked, flyers] = await Promise.all([fetchLinkedPages(links).catch(() => ""), fetchLinkedPdfs(links).catch(() => [])]);
     const c = await classify({
       from: m.from,
       subject: m.subject,
       text: linked ? `${m.text}\n\n${linked}` : m.text,
       receivedAt: m.date,
-      attachments: m.attachments,
+      attachments: [...m.attachments, ...flyers],
       context: `${profileCtx}\n\nArrived via: ${MAILBOX_LABEL[m.mailbox]}.\n\n${knownCtx()}`,
     });
     completePartyPrep(c, `${m.subject}\n${m.text}\n${linked}`);
@@ -100,6 +119,9 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
     for (const u of c.updates || []) {
       const target = existingEvents.find((e) => e.id === u.id) || newEvents.find((e) => e.id === u.id);
       if (!target) continue;
+      // Only an email that actually talks about this event may change it (a newsletter must not
+      // rewrite an unrelated event).
+      if (!mentionsEvent(`${m.subject}\n${m.text}\n${linked}`, target.title)) continue;
       const set = u.set || {};
       if (set.title) target.title = set.title;
       if (set.date) target.date = set.date;

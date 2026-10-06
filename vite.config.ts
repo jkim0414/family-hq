@@ -1,8 +1,14 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import { execSync } from "node:child_process";
+
+// Which build this is, shown in the Kimi tab — so you can tell whether a phone has the latest.
+const sha = (process.env.VERCEL_GIT_COMMIT_SHA || (() => { try { return execSync("git rev-parse HEAD").toString(); } catch { return "dev"; } })()).trim().slice(0, 7);
+const built = new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 export default defineConfig({
+  define: { __BUILD__: JSON.stringify(`${sha} · ${built}`) },
   plugins: [
     react(),
     VitePWA({

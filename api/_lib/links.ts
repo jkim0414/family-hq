@@ -1,5 +1,6 @@
 import { htmlToText } from "../../src/data/text.js";
 import * as web from "./browser.js";
+import type { Attachment } from "./imap.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Emails often keep the details behind a link — "RSVP here", "see the full
@@ -38,6 +39,8 @@ export function extractLinks(text: string, html?: string): Link[] {
   if (html) {
     for (const m of html.matchAll(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) add(m[1], htmlToText(m[2]));
   }
+  // Markdown-style links in plain-text mail ("[folleto en español](https://…)") keep their label.
+  for (const m of (text || "").matchAll(/\[([^\]\n]{1,120})\]\((https?:\/\/[^\s)]+)\)/g)) add(m[2], m[1]);
   for (const m of (text || "").matchAll(/https?:\/\/[^\s<>"')\]]+/g)) add(m[0], "");
   return out;
 }
@@ -130,3 +133,40 @@ export async function readUrl(url: string): Promise<string> {
 
 /** True when an invite page shows the family has already responded yes. */
 export const ATTENDING_RE = /you('| a)re (attending|going|confirmed)|your rsvp:? ?(yes|attending)|you replied yes|you('| ha)ve rsvp'?d|rsvp'?d yes|attending:? yes/i;
+
+// ── Linked PDFs (flyers) ─────────────────────────────────────────────────────
+// Schools link flyers as PDFs, usually on Google Drive ("…/file/d/<id>/view"), whose viewer
+// page is JavaScript-only. Fetch the file itself and hand it to filing like an attachment,
+// so the details only on the flyer (address, how the fundraiser works) get filed too.
+const MAX_PDF_BYTES = 4_500_000;
+const DRIVE_FILE_RE = /drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]{20,})/i;
+const TRANSLATION_RE = /español|espanol|spanish|chinese|中文|tagalog|vietnamese|tiếng việt|korean|한국어|arabic|russian|translation|translated/i;
+
+/** The PDFs linked from a message (up to `max`; translated copies of the same flyer skipped). */
+export async function fetchLinkedPdfs(links: Link[], max = 2): Promise<Attachment[]> {
+  const out: Attachment[] = [];
+  const seen = new Set<string>();
+  for (const l of links) {
+    if (out.length >= max) break;
+    if (TRANSLATION_RE.test(l.label)) continue;
+    const drive = l.url.match(DRIVE_FILE_RE);
+    const url = drive ? `https://drive.google.com/uc?export=download&id=${drive[1]}` : /\.pdf(\?|#|$)/i.test(l.url) ? l.url : "";
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const r = await fetch(url, { redirect: "follow", signal: ctl.signal });
+      if (!r.ok) continue;
+      const buf = Buffer.from(await r.arrayBuffer());
+      // Drive answers non-PDF files (and big-file warnings) with HTML — only a real PDF counts.
+      if (buf.length > MAX_PDF_BYTES || buf.subarray(0, 5).toString() !== "%PDF-") continue;
+      out.push({ kind: "pdf", mediaType: "application/pdf", data: buf.toString("base64") });
+    } catch {
+      /* unreachable or slow — the email text still gets filed */
+    } finally {
+      clearTimeout(t);
+    }
+  }
+  return out;
+}
