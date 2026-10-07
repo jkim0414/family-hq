@@ -79,9 +79,11 @@ export default function KidPage() {
         title={k.fullName}
         subtitle={`${k.current.program} · ${k.current.school}`}
         action={
-          <Button variant="secondary" size="sm" onClick={() => setEditing(true)}>
-            Edit
-          </Button>
+          data.me?.role !== "caregiver" && (
+            <Button variant="secondary" size="sm" onClick={() => setEditing(true)}>
+              Edit
+            </Button>
+          )
         }
       />
 

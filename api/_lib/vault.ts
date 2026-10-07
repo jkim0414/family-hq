@@ -25,14 +25,14 @@ function key(): Buffer {
   return Buffer.from(process.env.VAULT_KEY!, "hex");
 }
 
-function encrypt(text: string): VaultEntry["enc"] {
+export function encrypt(text: string): VaultEntry["enc"] {
   const iv = randomBytes(12);
   const c = createCipheriv("aes-256-gcm", key(), iv);
   const ct = Buffer.concat([c.update(text, "utf8"), c.final()]);
   return { iv: iv.toString("base64"), ct: ct.toString("base64"), tag: c.getAuthTag().toString("base64") };
 }
 
-function decrypt(enc: VaultEntry["enc"]): string {
+export function decrypt(enc: VaultEntry["enc"]): string {
   const d = createDecipheriv("aes-256-gcm", key(), Buffer.from(enc.iv, "base64"));
   d.setAuthTag(Buffer.from(enc.tag, "base64"));
   return Buffer.concat([d.update(Buffer.from(enc.ct, "base64")), d.final()]).toString("utf8");

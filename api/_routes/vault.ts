@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../_lib/http.js";
-import { requireUser } from "../_lib/auth.js";
+import { requireParent } from "../_lib/auth.js";
 import { addAudit } from "../_lib/db.js";
 import { vaultConfigured, listCredentials, addCredential, removeCredential } from "../_lib/vault.js";
 import { opConfigured, opVaultName, invalidateOpCache } from "../_lib/onepassword.js";
@@ -10,7 +10,7 @@ import { opConfigured, opVaultName, invalidateOpCache } from "../_lib/onepasswor
 // POST /api/vault { remove: name }                  → remove a local entry
 // POST /api/vault { refresh: true }                 → re-read the 1Password vault
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const user = await requireUser(req);
+  const user = await requireParent(req);
   if (!user) return json(res, 401, { error: "unauthorized" });
   try {
     if (req.method === "POST") {

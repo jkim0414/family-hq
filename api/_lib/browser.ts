@@ -40,7 +40,7 @@ async function bbContextId(): Promise<string | null> {
   return id;
 }
 
-async function bbCreate(): Promise<{ id: string; connectUrl: string }> {
+async function bbCreate(timeout = 300, viewport?: { width: number; height: number }): Promise<{ id: string; connectUrl: string }> {
   const contextId = await bbContextId();
   const r = await fetch(`${BB}/sessions`, {
     method: "POST",
@@ -50,8 +50,8 @@ async function bbCreate(): Promise<{ id: string; connectUrl: string }> {
       keepAlive: true,
       // An abandoned session (killed function, forgotten task) bills until this
       // expires — keep it short. Login state lives in the persistent context.
-      timeout: 300,
-      ...(contextId ? { browserSettings: { context: { id: contextId, persist: true } } } : {}),
+      timeout,
+      browserSettings: { ...(contextId ? { context: { id: contextId, persist: true } } : {}), ...(viewport ? { viewport } : {}) },
     }),
   });
   if (!r.ok) throw new Error(`Browserbase create ${r.status}: ${(await r.text()).slice(0, 200)}`);
@@ -62,6 +62,34 @@ async function bbGet(id: string): Promise<{ id: string; status: string; connectU
   const r = await fetch(`${BB}/sessions/${id}`, { headers: bbHeaders() });
   if (!r.ok) return null;
   return (await r.json()) as { id: string; status: string; connectUrl?: string };
+}
+
+/**
+ * A browser for a person to take over (a CAPTCHA Kimi can't do): a fresh session on the same
+ * profile (so it's signed in), opened at `url`, left running for `minutes` — Kimi continues in it.
+ */
+export async function openForHuman(url: string, minutes = 15): Promise<string> {
+  // Phone-sized, so the live view is legible when it's opened from a text (sites serve their mobile layout).
+  const s = await bbCreate(minutes * 60, { width: 430, height: 880 });
+  const browser = await chromium.connectOverCDP(s.connectUrl);
+  const page = await pickPage(browser);
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+  await browser.close().catch(() => {}); // disconnects; keepAlive keeps the session running
+  return s.id;
+}
+
+/** Whether a hosted session is still running. */
+export async function sessionRunning(id?: string): Promise<boolean> {
+  if (!id || !process.env.BROWSERBASE_API_KEY) return false;
+  return (await bbGet(id).catch(() => null))?.status === "RUNNING";
+}
+
+/** The live, interactive view of a session (Browserbase's debugger page), valid for `seconds`. */
+export async function liveViewUrl(id: string, seconds = 900): Promise<string | null> {
+  const r = await fetch(`${BB}/sessions/${id}/debug?expiresIn=${Math.max(60, Math.min(21600, seconds))}`, { headers: bbHeaders() }).catch(() => null);
+  if (!r?.ok) return null;
+  const j = (await r.json().catch(() => null)) as { debuggerFullscreenUrl?: string } | null;
+  return j?.debuggerFullscreenUrl || null;
 }
 
 /** End a hosted session (no-op for local). Best-effort. */
@@ -108,7 +136,7 @@ async function settle(page: Page): Promise<void> {
   await page.waitForTimeout(400);
 }
 
-const READ_SCRIPT = (maxText: number) => `(() => {
+const READ_SCRIPT = (maxText: number, maxEls: number) => `(() => {
   const sel = 'a[href],button,input,select,textarea,[role="button"],[role="link"],[role="checkbox"],[role="tab"],[role="menuitem"],[contenteditable="true"]';
   const vis = (e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
   document.querySelectorAll('[data-hq]').forEach((e) => e.removeAttribute('data-hq'));
@@ -120,7 +148,7 @@ const READ_SCRIPT = (maxText: number) => `(() => {
     let text = (e.innerText || '').trim();
     if (!text && e.labels && e.labels[0]) text = (e.labels[0].innerText || '').trim();
     if (!text) text = e.getAttribute('aria-label') || e.getAttribute('placeholder') || e.getAttribute('title') || e.getAttribute('name') || '';
-    text = String(text).replace(/\\s+/g, ' ').slice(0, 80);
+    text = String(text).replace(/\\s+/g, ' ').slice(0, 60);
     const extra = [];
     if (tag === 'input' && (type === 'radio' || type === 'checkbox')) extra.push('name=' + e.name + ' value=' + e.value + (e.checked ? ' checked' : ''));
     else if (tag === 'input' || tag === 'textarea') {
@@ -130,17 +158,22 @@ const READ_SCRIPT = (maxText: number) => `(() => {
       if (e.required) extra.push('required');
     }
     if (tag === 'select') extra.push('options: ' + Array.from(e.options).slice(0, 15).map((o) => o.value + (o.selected ? '*' : '')).join('|'));
-    if (tag === 'a') extra.push('→ ' + (e.getAttribute('href') || '').slice(0, 80));
+    // Links are clicked by number; the address only matters for an icon-only link.
+    if (tag === 'a' && !text) { try { const u = new URL(e.href); extra.push('→ ' + (u.pathname + u.search).slice(0, 60)); } catch {} }
     return '[' + i + '] ' + tag + (type ? '(' + type + ')' : '') + ' "' + text + '"' + (extra.length ? ' ' + extra.join(' ') : '');
   });
   const text = (document.body && document.body.innerText || '').replace(/\\n{3,}/g, '\\n\\n').slice(0, ${maxText});
-  return { elements: lines.join('\\n'), text };
+  // Cap the list: a busy page (site menus, footers) can list hundreds of links.
+  let out = '', n = 0;
+  for (const l of lines) { if (out.length + l.length > ${maxEls}) break; out += (out ? '\\n' : '') + l; n++; }
+  if (n < lines.length) out += '\\n(… ' + (lines.length - n) + ' more further down — browse_read with a larger maxText lists them all)';
+  return { elements: out, text };
 })()`;
 
 /** The page as the model sees it: URL, title, numbered interactive elements, visible text. */
 export async function readPage(page: Page, maxText = 6000): Promise<string> {
   await settle(page);
-  const data = (await page.evaluate(READ_SCRIPT(maxText))) as { elements: string; text: string };
+  const data = (await page.evaluate(READ_SCRIPT(maxText, Math.max(3000, Math.round(maxText * 1.2))))) as { elements: string; text: string };
   return `URL: ${page.url()}\nTITLE: ${await page.title()}\n\nINTERACTIVE ELEMENTS (reference by [n]):\n${data.elements || "(none)"}\n\nPAGE TEXT:\n${data.text || "(empty)"}`;
 }
 

@@ -3,7 +3,7 @@ import { json } from "../_lib/http.js";
 import { requireUser } from "../_lib/auth.js";
 import { getTaskMeta, getTaskMetas, listTaskIds } from "../_lib/db.js";
 import { stopTask } from "../_lib/agent.js";
-import { canSee, privateThreadId } from "../_lib/privacy.js";
+import { canSeeTask, privateThreadId, chatFor } from "../_lib/privacy.js";
 import { waitUntil } from "@vercel/functions";
 import { redis } from "../_lib/db.js";
 import { withReactions, REACTIONS, REACTIONS_VER } from "../_lib/reactions.js";
@@ -20,14 +20,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (req.method === "POST") {
       const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
       if (body.stop && body.id) {
-        if (!canSee(await getTaskMeta(String(body.id)), user.id)) return json(res, 404, { error: "not a browser task" });
+        if (!canSeeTask(await getTaskMeta(String(body.id)), user.id)) return json(res, 404, { error: "not a browser task" });
         const t = await stopTask(String(body.id), user.id);
         return t ? json(res, 200, { ok: true, status: t.status }) : json(res, 404, { error: "not a browser task" });
       }
       if (body.react) {
-        const threadId = body.thread === "private" ? privateThreadId(user.id) : "task-main";
+        const threadId = chatFor(body.thread, user.id);
+        if (!threadId) return json(res, 404, { error: "no such thread" });
         const meta = await getTaskMeta(threadId);
-        if (!meta || !canSee(meta, user.id)) return json(res, 404, { error: "no such thread" });
+        if (!meta || !canSeeTask(meta, user.id)) return json(res, 404, { error: "no such thread" });
         const { at, kind, emoji } = body.react || {};
         const entry = meta.log.find((e) => e.at === at && e.kind === kind && (kind === "user" || kind === "assistant"));
         if (!entry || !REACTIONS.includes(String(emoji))) return json(res, 400, { error: "bad reaction" });
@@ -51,7 +52,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const id = rawId === "private" ? privateThreadId(user.id) : rawId;
     if (id) {
       const t = await getTaskMeta(id);
-      if (!t || !canSee(t, user.id)) return json(res, 200, { task: null });
+      if (!t || !canSeeTask(t, user.id)) return json(res, 200, { task: null });
       // ?after=<iso> → just the count of assistant replies since then (the unread badge).
       if (typeof req.query.after === "string") {
         const after = req.query.after;
@@ -59,7 +60,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
       return json(res, 200, { task: { ...t, log: await withReactions(id, t.log) }, me: user.id });
     }
-    const metas = (await getTaskMetas(await listTaskIds())).filter((t) => canSee(t, user.id));
+    const metas = (await getTaskMetas(await listTaskIds())).filter((t) => canSeeTask(t, user.id));
     const tasks = metas.map((t) => ({
       id: t.id,
       title: t.title,
@@ -71,6 +72,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       followupNote: t.followupNote,
       lastReply: t.lastReply,
       privateTo: t.privateTo,
+      parentThread: t.parentThread,
     }));
     json(res, 200, { tasks, reactionsVer: Number((await redis.get(REACTIONS_VER).catch(() => 0)) || 0) });
   } catch (err) {

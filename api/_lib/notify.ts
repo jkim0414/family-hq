@@ -3,7 +3,7 @@ import { sendEmail } from "./email.js";
 import { userById } from "./auth.js";
 import { pushConfigured, sendPush } from "./push.js";
 import { redis } from "./db.js";
-import type { Channel } from "../../src/data/types";
+import type { Channel, Member } from "../../src/data/types";
 import { sendGroup } from "./groupsms.js";
 
 // Outbound delivery for the assistant's proactive messages: SMS via Twilio when
@@ -18,30 +18,33 @@ export function smsConfigured(): boolean {
   );
 }
 
-export function phoneFor(userId: "alex" | "sam"): string {
-  return userId === "alex" ? CONFIG.parents.alex.phone : CONFIG.parents.sam.phone;
+export function phoneFor(userId: Member): string {
+  return userId === "grandma" ? CONFIG.caregivers.grandma.phone : CONFIG.parents[userId].phone;
 }
 
-/** Map an inbound phone number (any formatting) to a parent. */
-export function userForPhone(raw: string): "alex" | "sam" | null {
+/** Members Kimi may text: the parents, and the caregiver when her texting is on (config sms: true). */
+export const textable = (id: Member): boolean => id !== "grandma" || CONFIG.caregivers.grandma.sms;
+
+/** Map an inbound phone number (any formatting) to a member Kimi texts with (null for anyone else). */
+export function userForPhone(raw: string): Member | null {
   const digits = raw.replace(/\D/g, "").replace(/^1(\d{10})$/, "$1");
-  for (const id of ["alex", "sam"] as const) {
-    if (phoneFor(id).replace(/\D/g, "").replace(/^1(\d{10})$/, "$1") === digits) return id;
+  for (const id of ["alex", "sam", "grandma"] as const) {
+    if (textable(id) && phoneFor(id).replace(/\D/g, "").replace(/^1(\d{10})$/, "$1") === digits) return id;
   }
   return null;
 }
 
 // ── A2P 10DLC compliance ─────────────────────────────────────────────────────
-// Registered program: Kimi texts only the two household members, after each has
+// Registered program: Kimi texts only household members, after each has
 // opted in by texting START and confirming with Y. Twilio's Advanced Opt-Out sends
 // the START / STOP / HELP replies; this code tracks the opt-in state and the Y step.
 
 export type SmsOptIn = "pending" | "enrolled" | "stopped";
-const optKey = (id: "alex" | "sam") => `sms_optin:${id}`;
-export async function getSmsOptIn(id: "alex" | "sam"): Promise<SmsOptIn | null> {
+const optKey = (id: Member) => `sms_optin:${id}`;
+export async function getSmsOptIn(id: Member): Promise<SmsOptIn | null> {
   return ((await redis.get<string>(optKey(id))) as SmsOptIn | null) ?? null;
 }
-export async function setSmsOptIn(id: "alex" | "sam", state: SmsOptIn): Promise<void> {
+export async function setSmsOptIn(id: Member, state: SmsOptIn): Promise<void> {
   await redis.set(optKey(id), state);
 }
 
@@ -118,17 +121,16 @@ export async function sendReactionSms(to: string, emoji: string, quoted: string)
   if (!res.ok) throw new Error(`Twilio ${res.status}: ${(await res.text()).slice(0, 200)}`);
 }
 
-/** Deliver a proactive assistant message to a parent on their channel. */
-export async function notify(userId: "alex" | "sam", text: string, channel: Channel, opts: { emailFallback?: boolean } = {}): Promise<void> {
-  const u = userById(userId);
-  if (!u) return;
-  // The family group text reaches both parents at once; without one, fall back to a one-on-one text.
+/** Deliver a proactive assistant message to a member on their channel. */
+export async function notify(userId: Member, text: string, channel: Channel, opts: { emailFallback?: boolean; thread?: string } = {}): Promise<void> {
+  const u = userById(userId); // null for a caregiver who doesn't sign in to the app (texts only)
+  // A chat's group text reaches everyone in it at once; without one, fall back to a one-on-one text.
   if (channel === "group") {
-    if (await sendGroup(text).catch((e) => (console.error("group send failed", e), false))) return;
+    if (await sendGroup(opts.thread || "task-main", text).catch((e) => (console.error("group send failed", e), false))) return;
     channel = "sms";
   }
-  // Text only a parent who has completed opt-in (START, then Y); otherwise push/email.
-  if (channel === "sms" && smsConfigured() && (await getSmsOptIn(userId)) === "enrolled") {
+  // Text only a member who has completed opt-in (START, then Y); otherwise push/email.
+  if (channel === "sms" && smsConfigured() && textable(userId) && (await getSmsOptIn(userId)) === "enrolled") {
     await sendSms(phoneFor(userId), text);
     return;
   }
@@ -142,7 +144,7 @@ export async function notify(userId: "alex" | "sam", text: string, channel: Chan
     }).catch(() => 0);
     if (sent > 0) return;
   }
-  if (opts.emailFallback === false) return; // timely nudges (leave-by) are pointless as email
+  if (opts.emailFallback === false || !u) return; // timely nudges (leave-by) are pointless as email
   const esc = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>");
   await sendEmail(`Kimi: ${text.split("\n")[0].slice(0, 70)}`, `<div style="font-family:system-ui,sans-serif;max-width:560px"><p>${esc}</p><p style="margin-top:16px"><a href="https://your-app.vercel.app/chat">Reply in the hub →</a></p></div>`, {
     to: [u.email],
@@ -151,7 +153,7 @@ export async function notify(userId: "alex" | "sam", text: string, channel: Chan
 }
 
 /** Deliver one message to several parents: once to the group text when that's the channel, else to each. */
-export async function deliver(to: ("alex" | "sam")[], text: string, channel: Channel): Promise<void> {
-  if (channel === "group" && (await sendGroup(text).catch(() => false))) return;
+export async function deliver(to: Member[], text: string, channel: Channel, thread = "task-main"): Promise<void> {
+  if (channel === "group" && (await sendGroup(thread, text).catch(() => false))) return;
   for (const p of to) await notify(p, text, channel === "group" ? "sms" : channel).catch((e) => console.error("notify failed", e));
 }

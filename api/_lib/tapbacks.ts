@@ -1,6 +1,6 @@
 import { converse } from "./agent.js";
 import { findQuoted, setReaction, latestKimi, isOffer, YES_EMOJI, type ParsedReaction } from "./reactions.js";
-import type { Channel, TaskLogEntry } from "../../src/data/types";
+import type { Channel, TaskLogEntry, Member } from "../../src/data/types";
 
 /**
  * A parent reacted to a message (a tapback by text, or in the app). Record it on the message;
@@ -9,7 +9,7 @@ import type { Channel, TaskLogEntry } from "../../src/data/types";
  */
 export async function handleReaction(
   threadId: string,
-  who: "alex" | "sam",
+  who: Member,
   channel: Channel,
   target: TaskLogEntry | ParsedReaction,
   emojiIfEntry?: string | null,

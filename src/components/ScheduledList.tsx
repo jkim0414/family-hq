@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useData } from "../dataStore";
 import { describe } from "../data/schedule";
+import { personName } from "../data/people";
 import { Card, Collapsible, TextAction, PrivateTag } from "./ui";
 import { Swipeable } from "./Swipeable";
 
@@ -55,7 +56,7 @@ export function ScheduledList() {
                         minute: "2-digit",
                       })
                     : "—"}{" "}
-                  · for {s.notify === "both" ? "Alex & Sam" : s.owner === "alex" ? "Alex" : "Sam"}
+                  · for {s.notify === "both" ? "Alex & Sam" : personName(s.owner)}
                 </div>
               </div>
             </Swipeable>

@@ -166,6 +166,18 @@ straight from the vault into the page.
 - **Or the built-in vault:** set **`VAULT_KEY`** (`openssl rand -hex 32`) and add logins in
   **Kimi tab → Logins**.
 
+Travel cards (Household → Travel) store passport and Known Traveler numbers encrypted with
+`VAULT_KEY`, so set it even if logins and cards come from 1Password.
+
+<a id="search"></a>
+## Flight, hotel & place search (optional)
+
+Kimi compares flights (Google Flights data), hotels, and local businesses through
+[SerpApi](https://serpapi.com) instead of a slow browser task. Create an account and set
+**`SERPAPI_API_KEY`**. Searches count against your plan (a flight round trip with returns is 2–3
+searches). Without it, Kimi falls back to web search. Booking still happens on the airline's or
+hotel's own site, with one approval.
+
 <a id="push"></a>
 ## Push notifications (optional)
 

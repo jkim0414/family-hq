@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../_lib/http.js";
-import { requireUser } from "../_lib/auth.js";
+import { requireParent } from "../_lib/auth.js";
 import { redis } from "../_lib/db.js";
 import { smsConfigured, getSmsOptIn } from "../_lib/notify.js";
 import { browserConfigured } from "../_lib/browser.js";
@@ -16,7 +16,7 @@ type Item = { id: string; label: string; what: string; required?: boolean; on: b
 const PARENTS = Object.keys(CONFIG.parents) as Parent[];
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const user = await requireUser(req);
+  const user = await requireParent(req);
   if (!user) return json(res, 401, { error: "unauthorized" });
   const env = (...keys: string[]) => keys.every((k) => !!process.env[k]);
   const [seen, googleToken, workcals, optins] = await Promise.all([
@@ -64,6 +64,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     },
     { id: "browser", label: "Web tasks", what: "Registers, orders, and books in a real browser (Browserbase)", on: browserConfigured(), guide: "web-tasks" },
     { id: "vault", label: "Logins & cards", what: "Signs in and pays without seeing passwords or cards (1Password)", on: opConfigured() || env("VAULT_KEY"), status: opConfigured() ? "1Password" : env("VAULT_KEY") ? "built-in vault" : undefined, guide: "logins-and-cards" },
+    { id: "search", label: "Flight, hotel & place search", what: "Compares flights and hotels and looks up local businesses in seconds (SerpApi)", on: env("SERPAPI_API_KEY"), guide: "search" },
     { id: "push", label: "Push notifications", what: "Alerts on your phone from the installed app", on: pushConfigured(), guide: "push" },
     { id: "weather", label: "Weather", what: "Forecasts in the digest and on outdoor events", on: weatherConfigured(), guide: "weather" },
   ];

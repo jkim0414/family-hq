@@ -1,33 +1,37 @@
 import { redis } from "./db.js";
 import { twilioAuth, readMedia, MEDIA_OK, type FetchedMedia } from "./twilio.js";
-import { smsBody, sendSms, getSmsOptIn, phoneFor, smsConfigured, tapbackText } from "./notify.js";
-import { CONFIG } from "../../src/data/config.js";
+import { smsBody, sendSms, getSmsOptIn, phoneFor, smsConfigured, tapbackText, textable } from "./notify.js";
+import { memberName } from "./privacy.js";
+import { MEMBERS, MAIN_THREAD, threadsFor, threadMembers } from "../../src/data/threads.js";
+import type { Member } from "../../src/data/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The family group text: Alex, Sam, and Kimi in one thread on their phones.
-// A phone number can't join a group text by itself, so this is a Twilio
-// Conversations "Group MMS" conversation: each parent is an SMS participant and
-// Kimi is a participant projected onto her number, so her messages come from it.
-// Group messages reach /api/sms/group (a conversation webhook) and go to the
-// family chat — every one is for Kimi (the parents talk privately elsewhere); one-on-one texts still reach /api/sms (Twilio only routes a
-// message to the group when the whole set of people matches). US numbers only,
-// green-bubble MMS, max 10 people. It's created once both parents have opted in.
+// Group texts: every shared chat (two or more members — the parents' family chat, each parent
+// with Grandma, and everyone) gets its own group text once everyone in it has opted in.
+// A phone number can't join a group text by itself, so each is a Twilio Conversations
+// "Group MMS" conversation: each member is an SMS participant and Kimi is a participant
+// projected onto her number, so her messages come from it. Twilio tells the groups apart by who
+// is in them, and only routes a text to a group when the whole set of people matches — so
+// one-on-one texts still reach /api/sms. Group messages reach /api/sms/group (a conversation
+// webhook) and go to that chat in the app. US numbers only, green-bubble MMS, max 10 people.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const API = "https://conversations.twilio.com/v1";
-const KEY = "sms_group";
+const KEY = "sms_groups"; // hash: chat thread id → Group
+const LEGACY_KEY = "sms_group"; // the first family group, from before shared chats
 export const KIMI_IDENTITY = "kimi";
 export const KIMI_NUMBER = process.env.TWILIO_FROM || "+15550100100";
 const WEBHOOK_URL = `${process.env.APP_URL || "https://your-app.vercel.app"}/api/sms/group`;
 
-const firstName = (p: "alex" | "sam") => CONFIG.parents[p].name.split(" ")[0];
+/** Chats that get a group text: every shared one. */
+const SHARED_THREADS = [...new Set(MEMBERS.flatMap(threadsFor))].filter((t) => (threadMembers(t) || []).length >= 2);
 
 export interface Group {
   sid: string;
   createdAt: string;
 }
 
-async function tw<T = Record<string, unknown>>(path: string, form?: Record<string, string>, method = form ? "POST" : "GET"): Promise<T> {
+async function tw<T = Record<string, unknown>>(path: string, form?: Record<string, string> | URLSearchParams, method = form ? "POST" : "GET"): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     method,
     headers: { authorization: twilioAuth(), ...(form ? { "content-type": "application/x-www-form-urlencoded" } : {}) },
@@ -37,54 +41,106 @@ async function tw<T = Record<string, unknown>>(path: string, form?: Record<strin
   return (res.status === 204 ? {} : await res.json()) as T;
 }
 
-export async function getGroup(): Promise<Group | null> {
-  return (await redis.get<Group>(KEY).catch(() => null)) ?? null;
+/** Every group text, by chat thread (the original family group is carried over once). */
+export async function getGroups(): Promise<Record<string, Group>> {
+  const all = ((await redis.hgetall<Record<string, Group>>(KEY).catch(() => null)) || {}) as Record<string, Group>;
+  if (!all[MAIN_THREAD]) {
+    const legacy = await redis.get<Group>(LEGACY_KEY).catch(() => null);
+    if (legacy?.sid) {
+      all[MAIN_THREAD] = legacy;
+      await redis.hset(KEY, { [MAIN_THREAD]: legacy });
+      await redis.del(LEGACY_KEY);
+    }
+  }
+  return all;
+}
+
+export async function getGroup(thread = MAIN_THREAD): Promise<Group | null> {
+  return (await getGroups())[thread] ?? null;
+}
+
+/** Which chat a Twilio conversation is. */
+export async function groupForSid(sid: string): Promise<{ thread: string; group: Group } | null> {
+  const all = await getGroups();
+  const thread = Object.keys(all).find((t) => all[t].sid === sid);
+  return thread ? { thread, group: all[thread] } : null;
+}
+
+function intro(thread: string): string {
+  const ms = threadMembers(thread) || [];
+  const names = ms.map(memberName);
+  const who = names.length === 2 ? names.join(" and ") : `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+  if (thread === MAIN_THREAD)
+    return `Hi ${who}! 👋 This is our family group text. Talk to each other here like normal. When you want me, just say "Kimi" ("Kimi, add swim Tuesday at 4") and I'll answer here for both of you. Everything here also shows up in the Family chat in the app.`;
+  return `Hi ${who}! 👋 This is our group text, just the ${ms.length + 1} of us. Ask me anything here and I'll answer for everyone in it. It shows up in your shared chat in the app too.`;
 }
 
 /**
- * Create the group text if both parents have opted in and there isn't one yet, and say hello.
- * Safe to call any time; returns the group (or null when not everyone is enrolled).
+ * Create the group text for every shared chat whose members have all opted in (and that doesn't
+ * have one yet), and say hello. Safe to call any time; returns the chats it created groups for.
  */
-export async function ensureGroup(): Promise<Group | null> {
-  const existing = await getGroup();
-  if (existing) return existing;
-  if (!smsConfigured()) return null;
-  const [a, b] = await Promise.all([getSmsOptIn("alex"), getSmsOptIn("sam")]);
-  if (a !== "enrolled" || b !== "enrolled") return null;
-  if (!(await redis.set(`${KEY}_lock`, "1", { nx: true, ex: 60 }))) return null;
+export async function ensureGroups(): Promise<string[]> {
+  if (!smsConfigured()) return [];
+  const existing = await getGroups();
+  const made: string[] = [];
+  for (const thread of SHARED_THREADS) {
+    if (existing[thread]) continue;
+    const ms = threadMembers(thread) || [];
+    if (!ms.every(textable)) continue;
+    const states = await Promise.all(ms.map(getSmsOptIn));
+    if (!states.every((x) => x === "enrolled")) continue;
+    if (await createGroup(thread, ms)) made.push(thread);
+  }
+  return made;
+}
+
+async function createGroup(thread: string, ms: Member[]): Promise<boolean> {
+  if (!(await redis.set(`${KEY}_lock:${thread}`, "1", { nx: true, ex: 60 }))) return false;
   let sid = "";
   try {
-    const conv = await tw<{ sid: string }>("/Conversations", {
-      FriendlyName: "Family HQ",
-      // Send through the registered A2P campaign's Messaging Service.
-      ...(process.env.TWILIO_MESSAGING_SERVICE_SID ? { MessagingServiceSid: process.env.TWILIO_MESSAGING_SERVICE_SID } : {}),
-    });
+    // Everyone joins at once: Twilio refuses a group whose people match an existing one, and adding
+    // them one by one would pass through a pair that already has its own group (e.g. Alex & Sam).
+    const form = new URLSearchParams({ FriendlyName: "Family HQ" });
+    // Send through the registered A2P campaign's Messaging Service.
+    if (process.env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", process.env.TWILIO_MESSAGING_SERVICE_SID);
+    form.append("Participant", JSON.stringify({ identity: KIMI_IDENTITY, messaging_binding: { projected_address: KIMI_NUMBER } }));
+    for (const m of ms) form.append("Participant", JSON.stringify({ messaging_binding: { address: phoneFor(m) } }));
+    const conv = await tw<{ sid: string }>("/ConversationWithParticipants", form);
     sid = conv.sid;
-    await tw(`/Conversations/${sid}/Participants`, { Identity: KIMI_IDENTITY, "MessagingBinding.ProjectedAddress": KIMI_NUMBER });
-    for (const p of ["alex", "sam"] as const) await tw(`/Conversations/${sid}/Participants`, { "MessagingBinding.Address": phoneFor(p) });
-    await tw(`/Conversations/${sid}/Webhooks`, {
+    // A conversation created with its participants takes a few seconds to initialize; until then
+    // Twilio refuses changes (50386). Retry those for up to ~40s.
+    const ready = async <T,>(fn: () => Promise<T>): Promise<T> => {
+      for (let i = 0; ; i++) {
+        try {
+          return await fn();
+        } catch (e) {
+          if (!String(e).includes("50386") || i >= 12) throw e;
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+    };
+    await ready(() => tw(`/Conversations/${sid}/Webhooks`, {
       Target: "webhook",
       "Configuration.Url": WEBHOOK_URL,
       "Configuration.Method": "POST",
       "Configuration.Filters": "onMessageAdded",
-    });
-    const group: Group = { sid, createdAt: new Date().toISOString() };
-    await redis.set(KEY, group);
-    await sendGroup(
-      `Hi ${firstName("alex")} and ${firstName("sam")}! 👋 This is our family group text. Talk to each other here like normal. When you want me, just say "Kimi" ("Kimi, add swim Tuesday at 4") and I'll answer here for both of you. Everything here also shows up in the Family chat in the app.`
-    );
-    return group;
+    }));
+    await ready(() => tw(`/Conversations/${sid}/Messages`, { Author: KIMI_IDENTITY, Body: smsBody(intro(thread)).slice(0, 1500) }));
+    // Recorded only once it's fully set up, so a failure leaves nothing pointing at a deleted group.
+    await redis.hset(KEY, { [thread]: { sid, createdAt: new Date().toISOString() } satisfies Group });
+    return true;
   } catch (e) {
     if (sid) await tw(`/Conversations/${sid}`, undefined, "DELETE").catch(() => {});
-    throw e;
+    console.error(`group text for ${thread} failed`, e);
+    return false;
   } finally {
-    await redis.del(`${KEY}_lock`).catch(() => {});
+    await redis.del(`${KEY}_lock:${thread}`).catch(() => {});
   }
 }
 
-/** Kimi says something in the group text (branded, plain text, HQ links only — like every text). */
-export async function sendGroup(raw: string): Promise<boolean> {
-  const g = await getGroup();
+/** Kimi says something in a chat's group text (branded, plain text, HQ links only — like every text). */
+export async function sendGroup(thread: string, raw: string): Promise<boolean> {
+  const g = await getGroup(thread);
   if (!g) return false;
   const body = smsBody(raw).slice(0, 1500);
   await tw(`/Conversations/${g.sid}/Messages`, { Author: KIMI_IDENTITY, Body: body });
@@ -92,33 +148,39 @@ export async function sendGroup(raw: string): Promise<boolean> {
 }
 
 /**
- * Kimi reacts to a message in the group the way a phone does (`Liked “…”`). Group MMS keeps the
+ * Kimi reacts to a message in a group the way a phone does (`Liked “…”`). Group MMS keeps the
  * curly quotes, so iPhones show it as a tapback on that bubble (tested on iOS).
  */
-export async function sendGroupReaction(emoji: string, quoted: string): Promise<boolean> {
-  const g = await getGroup();
+export async function sendGroupReaction(thread: string, emoji: string, quoted: string): Promise<boolean> {
+  const g = await getGroup(thread);
   const body = tapbackText(emoji, quoted);
   if (!g || !body) return false;
   await tw(`/Conversations/${g.sid}/Messages`, { Author: KIMI_IDENTITY, Body: body });
   return true;
 }
 
-/** Tear the group down (someone opted out — Kimi can't text them anymore). */
-export async function closeGroup(): Promise<void> {
-  const g = await getGroup();
+/** Tear a group down (someone in it opted out — Kimi can't text them anymore). */
+export async function closeGroup(thread: string): Promise<void> {
+  const g = await getGroup(thread);
   if (!g) return;
-  await redis.del(KEY);
+  await redis.hdel(KEY, thread);
   await tw(`/Conversations/${g.sid}`, undefined, "DELETE").catch((e) => console.error("group delete failed", e));
 }
 
-/** After a STOP (in the group or one-on-one): close the group and let the other parent know. */
-export async function closeGroupAfterStop(who: "alex" | "sam"): Promise<void> {
-  if (!(await getGroup())) return;
-  await closeGroup();
-  const other = who === "alex" ? "sam" : "alex";
-  if ((await getSmsOptIn(other)) !== "enrolled") return;
-  const name = who === "alex" ? "Alex" : "Sam";
-  await sendSms(phoneFor(other), `${name} opted out of texts from me, so I closed our family group text. I'll keep texting you one-on-one, and the Family chat in the app works as always.`).catch(() => {});
+/** After a STOP (in a group or one-on-one): close every group they're in and tell the others in them. */
+export async function closeGroupAfterStop(who: Member): Promise<void> {
+  const all = await getGroups();
+  const theirs = Object.keys(all).filter((t) => (threadMembers(t) || []).includes(who));
+  if (!theirs.length) return;
+  const others = new Set<Member>();
+  for (const t of theirs) {
+    await closeGroup(t);
+    for (const m of threadMembers(t) || []) if (m !== who) others.add(m);
+  }
+  for (const m of others) {
+    if (!textable(m) || (await getSmsOptIn(m)) !== "enrolled") continue;
+    await sendSms(phoneFor(m), `${memberName(who)} opted out of texts from me, so I closed our group text with them. I'll keep texting you one-on-one, and the chat in the app works as always.`).catch(() => {});
+  }
 }
 
 /** Download photos/PDFs from a group message (Conversations stores media in its own service). */
@@ -153,18 +215,21 @@ export async function fetchGroupMedia(chatServiceSid: string, mediaJson: string)
  * So look in the group for the same sender and words in the last two minutes (retrying briefly,
  * since the group copy can land a moment later).
  */
-export async function postedToGroup(from: string, text: string): Promise<boolean> {
-  const g = await getGroup();
-  if (!g) return false;
+export async function postedToGroup(from: string, text: string, who?: Member | null): Promise<boolean> {
+  const all = await getGroups();
+  const sids = Object.keys(all).filter((t) => !who || (threadMembers(t) || []).includes(who)).map((t) => all[t].sid);
+  if (!sids.length) return false;
   const digits = (s: string) => s.replace(/\D/g, "").replace(/^1(\d{10})$/, "$1");
   const norm = (s: string) => s.replace(/\s+/g, " ").trim();
   for (let i = 0; i < 4; i++) {
     if (i) await new Promise((r) => setTimeout(r, 2000));
-    const r = await tw<{ messages?: { author?: string; body?: string | null; date_created?: string }[] }>(`/Conversations/${g.sid}/Messages?Order=desc&PageSize=10`).catch(() => null);
-    const hit = r?.messages?.some(
-      (m) => digits(m.author || "") === digits(from) && Date.now() - Date.parse(m.date_created || "") < 120_000 && norm(m.body || "") === norm(text)
-    );
-    if (hit) return true;
+    for (const sid of sids) {
+      const r = await tw<{ messages?: { author?: string; body?: string | null; date_created?: string }[] }>(`/Conversations/${sid}/Messages?Order=desc&PageSize=10`).catch(() => null);
+      const hit = r?.messages?.some(
+        (m) => digits(m.author || "") === digits(from) && Date.now() - Date.parse(m.date_created || "") < 120_000 && norm(m.body || "") === norm(text)
+      );
+      if (hit) return true;
+    }
   }
   return false;
 }

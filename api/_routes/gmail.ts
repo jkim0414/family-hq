@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../_lib/http.js";
-import { requireUser } from "../_lib/auth.js";
+import { requireParent } from "../_lib/auth.js";
 import { addAudit } from "../_lib/db.js";
 import { getGmailConn, disconnectGmail } from "../_lib/gmail.js";
 import { inboxConfigured, inboxAddress } from "../_lib/imap.js";
@@ -10,7 +10,7 @@ import { watchEnabled, setWatch } from "../_lib/watch.js";
 // POST /api/gmail { watch: bool } → turn inbox watching on/off for this parent
 // POST /api/gmail { disconnect }  → revoke + forget this parent's Google connection
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const user = await requireUser(req);
+  const user = await requireParent(req);
   if (!user) return json(res, 401, { error: "unauthorized" });
   const me = user.id as "alex" | "sam";
   try {

@@ -1,3 +1,4 @@
+import { TravelCards } from "../components/TravelCards";
 import { Link } from "react-router-dom";
 import { useData } from "../dataStore";
 import { Card, PageHeader, SectionHeader } from "../components/ui";
@@ -24,6 +25,7 @@ const JUMPS = [
   ["routines", "Drop-off"],
   ["facts", "Facts"],
   ["people", "People"],
+  ["travel", "Travel"],
 ] as const;
 
 // The people, places, and standing facts Kimi works from.
@@ -72,6 +74,7 @@ export default function Household() {
 
       <div id="profile" className="space-y-6">
         <HouseholdProfile />
+        <TravelCards />
       </div>
     </div>
   );

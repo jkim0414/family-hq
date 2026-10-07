@@ -2,6 +2,7 @@ import { redis, getProfile, getCollection, setCollection } from "./db.js";
 import { notify } from "./notify.js";
 import { toHomeZone, fmt12, HOME_TZ } from "../../src/data/tz.js";
 import { ownerOf } from "../../src/data/people.js";
+import type { Member } from "../../src/data/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Drive time from home to an event, for "leave by" times. Geocoding by
@@ -69,7 +70,7 @@ export async function geocode(place: string): Promise<Pt | null> {
 }
 
 export async function homeAddress(): Promise<string | null> {
-  const body = (await getProfile()).sections.find((s) => s.key === "home")?.body || "";
+  const body = (await getProfile()).facts.filter((f) => f.topic === "home").map((f) => f.text).join("\n");
   const line = body.split("\n").find((l) => /\d+ .+\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|way|blvd|ct|court|pl|place)\b/i.test(l)) || body.split("\n")[0];
   return line?.trim() || null;
 }
@@ -152,8 +153,8 @@ export async function checkLeaveAlerts(): Promise<number> {
     const until = mins(leave) - mins(now);
     if (until > 15 || until < 4) continue;
     if (!(await redis.set(`leave_alert:${e.id}:${today}`, "1", { nx: true, ex: 2 * 86400 }).catch(() => null))) continue;
-    const owners = ownerOf(e).filter((o): o is "alex" | "sam" => o === "alex" || o === "sam");
-    const to: ("alex" | "sam")[] = e.privateTo ? [e.privateTo] : owners.length ? owners : ["alex", "sam"];
+    const owners = ownerOf(e).filter((o): o is Member => o === "alex" || o === "sam" || o === "grandma");
+    const to: Member[] = e.privateTo ? [e.privateTo] : owners.length ? owners : ["alex", "sam"];
     const text = `🚗 Leave by ${fmt12(leave)} for ${e.title} (about ${e.travelMin} min drive${e.location ? ` to ${e.location}` : ""}).`;
     for (const p of to) await notify(p, text, "app", { emailFallback: false }).catch((err) => console.error("leave alert failed", err));
     sent++;

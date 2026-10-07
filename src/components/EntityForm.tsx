@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { KIDS, formatPhone } from "../store";
 import { PEOPLE } from "../data/people";
 import { Button } from "./ui";
+import { LoyaltyEditor } from "./LoyaltyEditor";
+import { loyaltyError } from "../data/loyalty";
 import type { KidId } from "../data/types";
 
 export type FieldType =
@@ -15,7 +17,11 @@ export type FieldType =
   | "checkbox"
   | "email"
   | "phone"
-  | "url";
+  | "url"
+  /** Write-only (passport numbers…): masked as typed, never prefilled, never autofilled. */
+  | "secret"
+  /** A list of loyalty accounts ({program, number}[]), checked per program. */
+  | "loyalty";
 
 export interface FieldDef {
   key: string;
@@ -40,6 +46,14 @@ export function validateField(field: FieldDef, raw: unknown): string | null {
   const value = typeof raw === "string" ? raw.trim() : raw;
   const empty = value === "" || value === undefined || value === null;
 
+  if (field.type === "loyalty") {
+    for (const r of (Array.isArray(raw) ? raw : []) as { program: string; number: string }[]) {
+      if (!r.program?.trim() && !r.number?.trim()) continue; // an untouched new row
+      const err = loyaltyError(r);
+      if (err) return `${r.program || "A loyalty number"}: ${err}`;
+    }
+    return null;
+  }
   if (field.required && empty) return "Required";
   if (empty) return null; // optional + empty → fine
 
@@ -199,6 +213,24 @@ function FieldInput({
       return <input type="tel" inputMode="tel" className={cls} value={value || ""} placeholder={field.placeholder || "(555) 123-4567"} onChange={(e) => onChange(e.target.value)} />;
     case "url":
       return <input type="url" inputMode="url" autoCapitalize="off" autoCorrect="off" className={cls} value={value || ""} placeholder={field.placeholder || "example.com"} onChange={(e) => onChange(e.target.value)} />;
+    case "loyalty":
+      return <LoyaltyEditor value={value} onChange={onChange} showErrors={invalid} />;
+    case "secret":
+      return (
+        <input
+          type="text"
+          autoComplete="off"
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck={false}
+          data-1p-ignore
+          className={cls}
+          style={{ WebkitTextSecurity: value ? "disc" : "none" } as React.CSSProperties}
+          value={value || ""}
+          placeholder={field.placeholder}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      );
     case "checkbox":
       return (
         <label className="flex min-h-[44px] items-center gap-2 text-sm text-ink-2">

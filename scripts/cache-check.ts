@@ -26,7 +26,7 @@ const probe = { role: "user", content: "(cache check) Reply with just: ok" };
 console.log("tokens per call — old:", await count([...oldWindow, probe]), " new:", await count(trimThread([...thread, probe])));
 
 const call = async (messages: any[]) => {
-  const r: any = await client.messages.create({ model: MODEL, max_tokens: 300, system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }], tools, output_config: { effort: "low" }, messages: withCacheBreakpoint(messages) } as any);
+  const r: any = await client.messages.create({ model: MODEL, max_tokens: 300, system: [{ type: "text", text: system, cache_control: { type: "ephemeral", ttl: "1h" } }], tools, output_config: { effort: "low" }, messages: withCacheBreakpoint(messages) } as any);
   const u = r.usage;
   return { r, u: { input: u.input_tokens, cacheWrite: u.cache_creation_input_tokens, cacheRead: u.cache_read_input_tokens, output: u.output_tokens } };
 };

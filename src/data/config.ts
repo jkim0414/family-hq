@@ -11,6 +11,15 @@ export const CONFIG = {
     sam: { name: "Sam Carter", email: "sam@example.com", phone: "+15550100002" },
   },
 
+  // Other household members who use Kimi. A caregiver sees the family calendar, to-dos, kids,
+  // household facts and inboxes, and has her own private chat; she doesn't see the parents' chat,
+  // spending, logins/cards, or work-calendar details, and anything that costs money waits for a
+  // parent's approval. "callMe" is what Kimi calls her. Kimi texts her
+  // (sms: true) once she opts in with START + Y, like the parents. Sign-in needs an email.
+  caregivers: {
+    grandma: { name: "Grandma Carter", callMe: "Grandma", email: "", phone: "+15550100101", sms: false },
+  },
+
   // Where dated kid events are written (a Google Calendar id — usually the email
   // of the Google account you connect under Kimi → Connections).
   calendar: {

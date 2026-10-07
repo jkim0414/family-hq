@@ -4,20 +4,43 @@ import { Button, Icon, KimiAvatar } from "../components/ui";
 import { Markdown } from "../components/Markdown";
 import { encodeFiles, isAttachable, MAX_ATTACHMENTS, type Att } from "../attachments";
 import { fmtDateTime } from "../store";
+import { personName } from "../data/people";
+import { threadsFor, threadLabel, threadPeople, threadMembers, threadFor, MAIN_THREAD } from "../data/threads";
+import type { Member } from "../data/types";
 import type { TaskLogEntry, TaskStatus, Action, EmailPayload, StepPayload, Reaction } from "../data/types";
 
 const REACTIONS = ["👍", "❤️", "😂", "‼️", "❓", "👎"];
-const who = (by: Reaction["by"]) => (by === "kimi" ? "Kimi" : by === "alex" ? "Alex" : "Sam");
+const who = (by: Reaction["by"]) => (by === "kimi" ? "Kimi" : personName(by));
 
 // The one place to tell Kimi anything. Text goes to her; a photo or
 // PDF is filed straight away and she replies with what she did. Everything she
 // does on the family's behalf shows up here inline: approvals to decide,
 // background tasks with their status, files it wrote.
 
-export const CHAT_SEEN_KEY = "fhq:chatSeen";
-/** Last time this device opened the private "Just me" thread (for the unread badge). */
-export const CHAT_SEEN_PRIVATE_KEY = "fhq:chatSeenPrivate";
-type Thread = "family" | "private";
+/** When this device last opened a chat (for unread badges). The family chat and Just me keep their original keys. */
+export function seenKey(thread: string): string {
+  if (thread === MAIN_THREAD) return "fhq:chatSeen";
+  if (/^task-private-/.test(thread)) return "fhq:chatSeenPrivate";
+  return `fhq:chatSeen:${thread}`;
+}
+/** Kimi's replies since this device last opened each chat. */
+export async function unreadByThread(threads: string[]): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  await Promise.all(
+    threads.map(async (id) => {
+      try {
+        const seen = localStorage.getItem(seenKey(id)) || "1970-01-01";
+        const q = /^task-private-/.test(id) ? "private" : id;
+        const r = await fetch(`/api/tasks?id=${q}&after=${encodeURIComponent(seen)}`, { cache: "no-store" });
+        out[id] = r.ok ? Number((await r.json()).unread) || 0 : 0;
+      } catch {
+        out[id] = 0;
+      }
+    })
+  );
+  return out;
+}
+type Thread = string;
 const THREAD_KEY = "fhq:chatThread";
 
 interface TaskRow {
@@ -28,6 +51,7 @@ interface TaskRow {
   updatedAt: string;
   lastReply?: string;
   privateTo?: string;
+  parentThread?: string;
 }
 interface FileRow {
   id: string;
@@ -35,6 +59,8 @@ interface FileRow {
   createdAt: string;
   url: string;
   privateTo?: string;
+  audience?: string[];
+  thread?: string;
 }
 
 type Row =
@@ -62,18 +88,25 @@ const EXAMPLES = ["What's on this weekend?", "Move the dentist to Tuesday 3pm", 
 // The last thread this session showed, so reopening the tab paints it immediately
 // (already at the bottom) instead of blank → oldest-first → jump.
 type ChatCache = { log: TaskLogEntry[]; status: TaskStatus | null; tasks: TaskRow[]; files: FileRow[]; sig: string };
-const cacheByThread: Record<Thread, ChatCache | null> = { family: null, private: null };
+const cacheByThread: Record<Thread, ChatCache | null> = {};
 
-// Two conversations with Kimi: the shared family chat, and each parent's private "Just me"
-// thread (also where their one-on-one texts land). The choice is remembered on this device.
+// Each member's conversations with Kimi: their private "Just me" chat (also where their one-on-one
+// texts land), the parents' family chat, and the shared chats with Grandma. The choice is remembered
+// on this device.
 export default function Chat() {
-  const [thread, setThread] = useState<Thread>(() => {
+  const { data } = useData();
+  const me = (data.me?.id || "alex") as Member;
+  const mine = threadsFor(me);
+  const [stored, setThread] = useState<string>(() => {
     try {
-      return localStorage.getItem(THREAD_KEY) === "private" ? "private" : "family";
+      const v = localStorage.getItem(THREAD_KEY) || "";
+      return v === "private" ? threadFor([me]) : v === "family" ? MAIN_THREAD : v;
     } catch {
-      return "family";
+      return MAIN_THREAD;
     }
   });
+  // A caregiver isn't in the parents' family chat; anyone lands in Just me if the saved chat isn't theirs.
+  const thread = mine.includes(stored) ? stored : mine.includes(MAIN_THREAD) ? MAIN_THREAD : mine[0];
   const choose = (t: Thread) => {
     setThread(t);
     try {
@@ -82,15 +115,44 @@ export default function Chat() {
       /* ignore */
     }
   };
-  return <ChatThread key={thread} thread={thread} onThread={choose} />;
+  return <ChatThread key={thread} thread={thread} threads={mine} me={me} onThread={choose} />;
 }
 
-function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread) => void }) {
+/** The chat an approval, task, or file came from. */
+function homeThread(x: { thread?: string; parentThread?: string; privateTo?: string; audience?: string[] }): string {
+  if (x.thread) return x.thread;
+  if (x.parentThread) return x.parentThread;
+  if (x.privateTo) return threadFor([x.privateTo as Member]);
+  if (x.audience?.length) return threadFor(x.audience as Member[]);
+  return MAIN_THREAD;
+}
+
+/** The chip for a chat: "🔒 Just me", the other person's name, or "Everyone". */
+function chipLabel(t: string, me: Member): string {
+  const ms = threadMembers(t) || [];
+  if (ms.length >= 3) return "Everyone";
+  return threadLabel(t, me);
+}
+
+function ChatThread({ thread, threads, me: myId, onThread }: { thread: Thread; threads: string[]; me: Member; onThread: (t: Thread) => void }) {
   const { data, decideAction } = useData();
   const cached = cacheByThread[thread];
-  const isPrivate = thread === "private";
-  // Cards shown in a thread belong to it: shared ones in Family, your private ones in Just me.
-  const inThread = (x: { privateTo?: string }) => (isPrivate ? !!x.privateTo : !x.privateTo);
+  const isPrivate = (threadMembers(thread) || []).length === 1;
+  const isMain = thread === MAIN_THREAD;
+  const caregiverView = data.me?.role === "caregiver";
+  // Cards shown in a chat belong to it. A caregiver's purchase requests also show in the parents'
+  // family chat, where they decide them.
+  const inThread = (x: { thread?: string; parentThread?: string; privateTo?: string; audience?: string[]; requester?: string }) =>
+    homeThread(x) === thread || (isMain && !!x.requester && x.requester !== myId && !(threadMembers(homeThread(x)) || []).includes(myId));
+  // Unread dots on the other chats.
+  const [unread, setUnread] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const others = threads.filter((t) => t !== thread);
+    const check = () => document.visibilityState === "visible" && unreadByThread(others).then(setUnread);
+    check();
+    const iv = setInterval(check, 30000);
+    return () => clearInterval(iv);
+  }, [thread]);
   const [log, setLog] = useState<TaskLogEntry[]>(cached?.log ?? []);
   const [status, setStatus] = useState<TaskStatus | null>(cached?.status ?? null);
   const [tasks, setTasks] = useState<TaskRow[]>(cached?.tasks ?? []);
@@ -165,7 +227,7 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
     setTasks(browserTasks);
     if (cacheByThread[thread]) cacheByThread[thread]!.tasks = browserTasks;
     if (!force && next === sig.current) return;
-    const [m, f] = await Promise.all([get(`/api/tasks?id=${isPrivate ? "private" : "task-main"}`), get("/api/files")]);
+    const [m, f] = await Promise.all([get(`/api/tasks?id=${isPrivate ? "private" : thread}`), get("/api/files")]);
     if (!m) return;
     // A private thread doesn't exist until its first message: show it empty, not loading.
     const tlog: TaskLogEntry[] = m.task?.log || [];
@@ -179,7 +241,7 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
     setLoaded(true);
     cacheByThread[thread] = { log: tlog, status: tstatus, tasks: browserTasks, files: tfiles, sig: next };
     try {
-      localStorage.setItem(isPrivate ? CHAT_SEEN_PRIVATE_KEY : CHAT_SEEN_KEY, new Date().toISOString());
+      localStorage.setItem(seenKey(thread), new Date().toISOString());
     } catch {
       /* ignore */
     }
@@ -276,26 +338,29 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
           <KimiAvatar size={36} />
           <div>
             <h1 className="text-[22px] font-bold leading-tight text-ink">Kimi</h1>
-            <div className="truncate text-[12px] text-ink-3">{isPrivate ? "Only you can see this" : "Your family's assistant"}</div>
+            <div className="truncate text-[12px] text-ink-3">{isPrivate ? "Only you can see this" : `${threadPeople(thread, myId)}`}</div>
           </div>
         </div>
-        <div className="flex shrink-0 rounded-full bg-fill p-0.5 text-[12px] font-semibold" role="tablist" aria-label="Conversation">
-          {(["family", "private"] as const).map((t) => (
+        {status === "waiting" && <span className="rounded-full bg-warn-soft px-2 py-0.5 text-[11px] font-semibold text-warn">Follow-up scheduled</span>}
+        {status === "running" && !busy && <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-semibold text-accent">Working…</span>}
+      </div>
+      {threads.length > 1 && (
+        <div className="-mx-4 mb-2 flex gap-1.5 overflow-x-auto px-4 pb-0.5 text-[13px] font-semibold [scrollbar-width:none] md:mx-0 md:px-0" role="tablist" aria-label="Conversation">
+          {threads.map((t) => (
             <button
               key={t}
               type="button"
               role="tab"
               aria-selected={thread === t}
               onClick={() => thread !== t && onThread(t)}
-              className={`min-h-[30px] whitespace-nowrap rounded-full px-3 ${thread === t ? "bg-surface text-ink shadow-sm" : "text-ink-3"}`}
+              className={`min-h-[34px] shrink-0 whitespace-nowrap rounded-full px-3.5 ${thread === t ? "bg-ink text-surface" : "bg-fill text-ink-2"}`}
             >
-              {t === "family" ? "Family" : "🔒 Just me"}
+              {chipLabel(t, myId)}
+              {thread !== t && (unread[t] || 0) > 0 && <span className="ml-1.5 inline-block h-2 w-2 rounded-full bg-danger align-middle" aria-label="unread" />}
             </button>
           ))}
         </div>
-        {status === "waiting" && <span className="rounded-full bg-warn-soft px-2 py-0.5 text-[11px] font-semibold text-warn">Follow-up scheduled</span>}
-        {status === "running" && !busy && <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-semibold text-accent">Working…</span>}
-      </div>
+      )}
 
       {/* column-reverse anchors the scroll at the newest message, even as images/markdown settle. */}
       <div ref={scroller} className="flex flex-1 flex-col-reverse overflow-y-auto">
@@ -304,8 +369,12 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
           <div className="rounded-2xl bg-surface p-4 shadow-sm ring-1 ring-line">
             <div className="text-sm text-ink-2">
               {isPrivate
-                ? "Just you and me here — the other parent can't see this chat, and your one-on-one texts with me land here too. Ask me to keep something private (a surprise, a gift idea) and it stays off the family calendar and chat."
-                : "Hi, I'm Kimi! Ask me about the schedule, hand me a task, or send a photo or PDF and I'll file it."}
+                ? caregiverView
+                  ? "Just you and me here — nobody else can see this chat. Ask me what's on the calendar, add something to it, or ask me to order something (Alex or Sam approves purchases)."
+                  : "Just you and me here — nobody else can see this chat, and your one-on-one texts with me land here too. Ask me to keep something private (a surprise, a gift idea) and it stays off the family calendar and chat."
+                : isMain
+                  ? "Hi, I'm Kimi! Ask me about the schedule, hand me a task, or send a photo or PDF and I'll file it."
+                  : `A chat for ${threadPeople(thread, myId).replace(/^You/, "you")}, and me. Everyone here sees everything in it — plan a pickup, swap a day, or ask me to put something on the calendar.`}
             </div>
             <div className="mt-2 flex flex-wrap gap-1.5">
               {EXAMPLES.map((ex) => (
@@ -456,14 +525,18 @@ function ChatThread({ thread, onThread }: { thread: Thread; onThread: (t: Thread
                     </pre>
                   )}
                   {expanded && (step?.hasScreenshot || step?.screenshot) && <img src={`/api/action?id=${a.id}&shot=1`} alt="" className="mt-1 w-full rounded-lg ring-1 ring-line" />}
-                  <div className="mt-2 flex gap-2">
-                    <Button size="sm" onClick={() => decideAction(a.id, "approve")} className="bg-ok active:bg-ok">
-                      {isEmail ? "Approve & send" : "Approve"}
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => decideAction(a.id, "decline")}>
-                      Decline
-                    </Button>
-                  </div>
+                  {caregiverView ? (
+                    <div className="mt-1 text-xs text-ink-3">Waiting for Alex or Sam to approve.</div>
+                  ) : (
+                    <div className="mt-2 flex gap-2">
+                      <Button size="sm" onClick={() => decideAction(a.id, "approve")} className="bg-ok active:bg-ok">
+                        {isEmail ? "Approve & send" : "Approve"}
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => decideAction(a.id, "decline")}>
+                        Decline
+                      </Button>
+                    </div>
+                  )}
                 </>
               )}
               {a.status !== "proposed" && (a.result || a.error) && <div className="mt-0.5 text-xs text-ink-3">{a.result || a.error}</div>}

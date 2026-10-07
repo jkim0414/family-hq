@@ -1,3 +1,4 @@
+import { recordUsage } from "./usage.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { redis } from "./db.js";
 import { fetchRecent, inboxConfigured, type RecentMessage } from "./imap.js";
@@ -124,6 +125,7 @@ NOT relevant: work email, finance/banking/investing/statements/credit, marketing
 Reply with ONLY a JSON array of the relevant indices, e.g. [0,3]. Empty array if none.`,
     messages: [{ role: "user", content: lines.join("\n") }],
   });
+  recordUsage("triage", TRIAGE_MODEL, res.usage);
   const text = res.content.find((b) => b.type === "text")?.text || "[]";
   const m = text.match(/\[[\d,\s]*\]/);
   const arr: unknown = m ? JSON.parse(m[0]) : [];

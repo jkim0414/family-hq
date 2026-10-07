@@ -1,3 +1,4 @@
+import { normalizeProfile } from "./data/facts";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { KIDS } from "./data/kids";
 import { CONTACTS, PLACES, ROUTINES } from "./data/meta";
@@ -17,6 +18,8 @@ export interface AppState {
   spending: Purchase[];
   schedules: Schedule[];
   profile: HouseholdProfile;
+  /** Who's signed in. A caregiver gets a trimmed app (her own chat; no money, logins, or setup). */
+  me?: { id: string; name: string; role: "parent" | "caregiver" };
 }
 
 // Initial state before live data loads: the real roster/directory (stable, bundled)
@@ -34,7 +37,7 @@ const INITIAL: AppState = {
   audit: [],
   spending: [],
   schedules: [],
-  profile: { sections: [], people: [] },
+  profile: { facts: [], people: [] },
 };
 
 // Cache the last live data so loads render instantly (and work offline) — no flash.
@@ -42,7 +45,7 @@ const CACHE_KEY = "fhq:data";
 function readCache(): AppState | null {
   try {
     const j = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
-    return j && Array.isArray(j.kids) ? j : null;
+    return j && Array.isArray(j.kids) ? { ...j, profile: normalizeProfile(j.profile) } : null;
   } catch {
     return null;
   }
@@ -115,7 +118,7 @@ export function DataProvider({ children }: { children: ReactNode }) {
         if (typeof json.v === "number") version.current = json.v;
         // Guard against an empty/unseeded store wiping the UI.
         if (json && Array.isArray(json.kids) && json.kids.length) {
-          const merged = { ...INITIAL, ...json };
+          const merged = { ...INITIAL, ...json, profile: normalizeProfile(json.profile) };
           setData(merged);
           setSource("live");
           try {

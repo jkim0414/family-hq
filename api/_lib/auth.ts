@@ -2,23 +2,27 @@ import { randomBytes, randomInt } from "node:crypto";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { redis } from "./db.js";
 import { CONFIG } from "../../src/data/config.js";
+import type { Member } from "../../src/data/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Magic-link auth with long-lived device sessions. The app is a two-person
-// household tool: only the parents' emails can log in, a login link is valid
+// Magic-link auth with long-lived device sessions. The app is a household
+// tool: only the household's emails can log in (parents, and a caregiver), a login link is valid
 // for 15 minutes, and a successful login sets an httpOnly cookie that lasts
 // ~6 months so each phone logs in once.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface User {
   email: string;
-  id: "alex" | "sam";
+  id: Member;
   name: string;
+  role: "parent" | "caregiver";
 }
 
+// Everyone who can sign in: the parents, and a caregiver once her email is set in config.
 const PARENTS: User[] = [
-  { email: CONFIG.parents.alex.email.toLowerCase(), id: "alex", name: "Alex" },
-  { email: CONFIG.parents.sam.email.toLowerCase(), id: "sam", name: "Sam" },
+  { email: CONFIG.parents.alex.email.toLowerCase(), id: "alex", name: "Alex", role: "parent" },
+  { email: CONFIG.parents.sam.email.toLowerCase(), id: "sam", name: "Sam", role: "parent" },
+  ...(CONFIG.caregivers.grandma.email ? [{ email: CONFIG.caregivers.grandma.email.toLowerCase(), id: "grandma" as const, name: CONFIG.caregivers.grandma.callMe, role: "caregiver" as const }] : []),
 ];
 
 const COOKIE = "fhq_session";
@@ -102,6 +106,12 @@ export async function requireUser(req: VercelRequest): Promise<User | null> {
   const s = await redis.getex<{ email: string }>(`session:${id}`, { ex: SESSION_TTL_S });
   if (!s?.email) return null;
   return userForEmail(s.email);
+}
+
+/** The signed-in user, only if a parent (logins/cards, inbox and calendar connections, setup). */
+export async function requireParent(req: VercelRequest): Promise<User | null> {
+  const u = await requireUser(req);
+  return u && u.role === "parent" ? u : null;
 }
 
 export function setSessionCookie(res: VercelResponse, id: string): void {

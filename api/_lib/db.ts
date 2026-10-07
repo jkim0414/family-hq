@@ -2,6 +2,7 @@
 // Each collection is stored as a single JSON value under a stable key. The
 // @upstash/redis client serializes/parses objects automatically.
 
+import { normalizeProfile } from "../../src/data/facts.js";
 import { Redis } from "@upstash/redis";
 import { randomBytes } from "node:crypto";
 import type { Kid, Contact, Place, Routine, Comm, CalEvent, Todo, Suggestion, HouseholdProfile, Task, Action, AuditEntry, FileDoc, Purchase, Schedule } from "../../src/data/types";
@@ -67,9 +68,8 @@ export async function getStateVersion(): Promise<number> {
 }
 
 // The household profile is a singleton object (not an array collection).
-const DEFAULT_PROFILE: HouseholdProfile = { sections: [], people: [] };
 export async function getProfile(): Promise<HouseholdProfile> {
-  return (await redis.get<HouseholdProfile>("profile")) ?? DEFAULT_PROFILE;
+  return normalizeProfile(await redis.get<HouseholdProfile>("profile"));
 }
 export async function setProfile(p: HouseholdProfile): Promise<void> {
   await redis.set("profile", p);
@@ -80,7 +80,7 @@ export async function setProfile(p: HouseholdProfile): Promise<void> {
 export async function getState(): Promise<AppState & { profile: HouseholdProfile }> {
   const vals = await redis.mget<unknown[]>(...COLLECTIONS, "profile");
   const base = Object.fromEntries(COLLECTIONS.map((c, i) => [c, (vals[i] as unknown) ?? []])) as unknown as AppState;
-  return { ...base, profile: (vals[COLLECTIONS.length] as HouseholdProfile) ?? DEFAULT_PROFILE };
+  return { ...base, profile: normalizeProfile(vals[COLLECTIONS.length] as HouseholdProfile | null) };
 }
 
 /** Append items to a collection, de-duplicating by id. */

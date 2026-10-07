@@ -22,36 +22,49 @@ const JUMPS = [
 // Everything about Kimi herself: what she can reach, what she may sign into, what
 // it produced, and what it did.
 export default function Assistant() {
-  const { logout } = useData();
+  const { logout, data } = useData();
+  // A caregiver's Kimi tab: notifications, her own reminders and files — no connections,
+  // setup, logins, spending, or the household's activity log.
+  const caregiver = data.me?.role === "caregiver";
+  const jumps = caregiver ? JUMPS.filter(([id]) => id === "scheduled" || id === "files") : JUMPS;
 
   return (
     <div className="space-y-8">
       <KimiHeader />
 
       <div className="no-scrollbar -mx-4 -mt-3 flex gap-2 overflow-x-auto px-4 py-1 md:mx-0 md:px-0.5">
-        {JUMPS.map(([id, label]) => (
+        {jumps.map(([id, label]) => (
           <a key={id} href={`#${id}`} className="min-h-[36px] shrink-0 rounded-full bg-surface px-3 text-xs font-medium leading-[36px] text-ink-2 ring-1 ring-line">
             {label}
           </a>
         ))}
       </div>
 
-      <section id="connections">
-        <SectionHeader title="Connections" hint="What Kimi reads and how she reaches you." />
-        <Card className="divide-y divide-line">
-          <GmailConnection />
-          <WorkCalendar who="alex" />
-          <WorkCalendar who="sam" />
-          <Notifications />
-        </Card>
-      </section>
+      {caregiver ? (
+        <section id="connections">
+          <SectionHeader title="Notifications" hint="How Kimi reaches you on this phone." />
+          <Card>
+            <Notifications />
+          </Card>
+        </section>
+      ) : (
+        <section id="connections">
+          <SectionHeader title="Connections" hint="What Kimi reads and how she reaches you." />
+          <Card className="divide-y divide-line">
+            <GmailConnection />
+            <WorkCalendar who="alex" />
+            <WorkCalendar who="sam" />
+            <Notifications />
+          </Card>
+        </section>
+      )}
 
-      <SetupList />
-      <SavedLogins />
+      {!caregiver && <SetupList />}
+      {!caregiver && <SavedLogins />}
       <ScheduledList />
       <FilesList />
-      <SpendingList />
-      <History />
+      {!caregiver && <SpendingList />}
+      {!caregiver && <History />}
 
       <section>
         <Card>

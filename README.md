@@ -43,6 +43,21 @@ Theo, and Ava) is fictional.
 - **Plans around work.** Both parents' work calendars are read as private context — never
   copied to the family calendar — with holds (drop-off, focus time, commutes) told apart from
   meetings.
+- **A grandparent (or other caregiver) too.** Optional caregiver role: her own private chat with
+  Kimi, plus a shared chat with each parent and one with everyone (each its own group text once
+  everyone in it opts in). She sees the calendar, to-dos, and household facts, not spending,
+  logins, cards, or the parents' own chat; anything that costs money goes to both parents to
+  approve, right away.
+- **Travel.** Flight, hotel, and local-business search in seconds (SerpApi) instead of a slow
+  browser session. Travel cards per person: legal name, birthday, seat, loyalty numbers, and
+  passport / Known Traveler numbers stored encrypted and typed into booking sites without the
+  model ever seeing them.
+- **Hands you the browser for CAPTCHAs.** When a site asks "are you a robot", Kimi doesn't try to
+  get around it: she sends whoever asked a sign-in-protected link to the live browser, they solve
+  it on their phone and tap Done, and she carries on from the same page.
+- **Typed household facts, versioned files.** Facts are short statements with a topic and who
+  they're about, updated in place instead of piling up; a revised plan updates the same file and
+  link and keeps its history.
 - **Asks before anything irreversible — once.** Paying, booking, registering, cancelling:
   Kimi proposes, a parent approves, and only then does she act. A separate safety check
   reviews every payment click, card entry, and new browser job against what the parent

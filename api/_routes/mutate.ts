@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getCollection, setCollection, type AppState } from "../_lib/db.js";
 import { json } from "../_lib/http.js";
+import { canSee, PARENTS } from "../_lib/privacy.js";
 import { requireUser } from "../_lib/auth.js";
 import { updateCalendarEvent, deleteCalendarEvent } from "../_lib/calendar.js";
 import type { CalEvent } from "../../src/data/types";
@@ -27,10 +28,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const { op, collection } = body || {};
     if (!EDITABLE.includes(collection)) return json(res, 400, { error: "bad collection" });
+    // The caregiver can edit the calendar and to-dos; the kids, contacts, places and routines are the parents'.
+    if (user.role !== "parent" && collection !== "events" && collection !== "todos") return json(res, 403, { error: "only a parent can edit that" });
 
     const list = (await getCollection(collection)) as any[];
-    // A parent can only touch shared items and their own private ones.
-    const mine = (x: any) => !x?.privateTo || x.privateTo === user.id;
+    // A member can only touch items they can see (shared ones, their own private ones, and their chats').
+    const mine = (x: any) => canSee(x || {}, user.id);
 
     if (op === "delete") {
       const id = body.id;
@@ -49,10 +52,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const prior = list.find((x) => x.id === item.id);
       if (prior && !mine(prior)) return json(res, 404, { error: "not found" });
       if (item.privateTo && item.privateTo !== user.id) return json(res, 400, { error: "can only make items private to yourself" });
+      if (item.audience && !(Array.isArray(item.audience) && item.audience.includes(user.id))) return json(res, 400, { error: "bad audience" });
       if (prior?.privateTo) item.privateTo = prior.privateTo; // stays private
+      if (prior?.audience) item.audience = prior.audience; // stays within its chat
 
       // Events: sync to Google Calendar and capture the gcal id — never for private events.
-      if (collection === "events" && !item.privateTo) {
+      if (collection === "events" && PARENTS.every((p) => canSee(item, p))) {
         try {
           const gcalId = await updateCalendarEvent(item as CalEvent);
           if (gcalId) item.gcalId = gcalId;

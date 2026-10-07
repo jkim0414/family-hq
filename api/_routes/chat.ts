@@ -1,9 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../_lib/http.js";
 import { requireUser } from "../_lib/auth.js";
-import { converse, appendExchange, MAIN_TASK_ID } from "../_lib/agent.js";
+import { converse, appendExchange } from "../_lib/agent.js";
 import { runCapture, describeCapture } from "../_lib/capture.js";
-import { privateThreadId } from "../_lib/privacy.js";
+import { chatFor, threadMembers } from "../_lib/privacy.js";
+import { pushConfigured, sendPush } from "../_lib/push.js";
 
 // POST /api/chat { message, attachments? }  — the one place to tell Kimi anything.
 //
@@ -22,8 +23,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const message = String(body?.message || "").trim();
     const attachments: { mediaType?: string; data: string }[] = Array.isArray(body?.attachments) ? body.attachments.filter((a: any) => a?.data) : [];
     if (!message && !attachments.length) return json(res, 400, { error: "message required" });
-    // "private" = this parent's "Just me" thread; otherwise the shared family chat.
-    const threadId = body?.thread === "private" ? privateThreadId(user.id) : MAIN_TASK_ID;
+    // Which chat: "private" (Just me), the family chat, or a shared chat this member is in.
+    const threadId = chatFor(body?.thread, user.id);
+    if (!threadId) return json(res, 403, { error: "not your chat" });
+
+    // In a shared chat with Grandma, the others get a nudge that someone wrote (they read it in the app).
+    const others = threadId === "task-main" ? [] : threadMembers(threadId).filter((m) => m !== user.id);
+    if (others.length && pushConfigured()) {
+      const body = message || "sent a photo";
+      await Promise.all(others.map((m) => sendPush(m, { title: `${user.name} · Kimi chat`, body: body.length > 140 ? body.slice(0, 137) + "…" : body, url: "/chat", tag: threadId }).catch(() => 0)));
+    }
 
     if (attachments.length) {
       const result = await runCapture({ text: message, images: attachments });

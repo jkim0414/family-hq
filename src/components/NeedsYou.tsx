@@ -16,12 +16,18 @@ type Row = { kind: "action"; a: Action } | { kind: "suggestion"; s: Suggestion }
 
 const SHOW = 5;
 
-export function needsYouCount(actions: Action[] | undefined, suggestions: Suggestion[] | undefined, todos: Todo[]): number {
+/** A caregiver's urgent to-dos are only the ones she's down for (the rest are the parents'). */
+function urgentFor(todos: Todo[], me?: { id: string; role: string }): Todo[] {
+  const urgent = urgentTodos(todos);
+  return me?.role === "caregiver" ? urgent.filter((t) => (t.owner || []).includes(me.id)) : urgent;
+}
+
+export function needsYouCount(actions: Action[] | undefined, suggestions: Suggestion[] | undefined, todos: Todo[], me?: { id: string; role: string }): number {
   const today = todayISO();
   return (
     (actions || []).filter((a) => a.status === "proposed").length +
     (suggestions || []).filter((s) => !s.notBefore || s.notBefore <= today).length +
-    urgentTodos(todos).length
+    urgentFor(todos, me).length
   );
 }
 
@@ -36,7 +42,7 @@ export function NeedsYou() {
   const rows: Row[] = [
     ...(data.actions || []).filter((a) => a.status === "proposed").map((a): Row => ({ kind: "action", a })),
     ...data.suggestions.filter((s) => !s.notBefore || s.notBefore <= today).map((s): Row => ({ kind: "suggestion", s })),
-    ...urgentTodos(data.todos).map((t): Row => ({ kind: "todo", t })),
+    ...urgentFor(data.todos, data.me).map((t): Row => ({ kind: "todo", t })),
   ];
 
   if (!rows.length)
@@ -117,14 +123,18 @@ export function NeedsYou() {
                   </pre>
                 )}
                 {expanded && (step?.hasScreenshot || step?.screenshot) && <img src={`/api/action?id=${a.id}&shot=1`} alt="Page the task is on" className="mt-1 w-full rounded-lg ring-1 ring-line" />}
-                <div className="mt-2 flex gap-2">
-                  <Button size="sm" disabled={busy === a.id} onClick={() => run(a.id, () => decideAction(a.id, "approve"))} className="bg-ok active:bg-ok">
-                    {isEmail ? "Approve & send" : "Approve"}
-                  </Button>
-                  <Button size="sm" variant="ghost" disabled={busy === a.id} onClick={() => run(a.id, () => decideAction(a.id, "decline"))}>
-                    Decline
-                  </Button>
-                </div>
+                {data.me?.role === "caregiver" ? (
+                  <div className="mt-1 text-xs text-ink-3">Waiting for Alex or Sam to approve.</div>
+                ) : (
+                  <div className="mt-2 flex gap-2">
+                    <Button size="sm" disabled={busy === a.id} onClick={() => run(a.id, () => decideAction(a.id, "approve"))} className="bg-ok active:bg-ok">
+                      {isEmail ? "Approve & send" : "Approve"}
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busy === a.id} onClick={() => run(a.id, () => decideAction(a.id, "decline"))}>
+                      Decline
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
           );

@@ -46,14 +46,17 @@ type Editing = { kind: "places" | "contacts" | "routines"; item: Record<string, 
 
 export function DirectorySections() {
   const { data, mutate } = useData();
-  const [editing, setEditing] = useState<Editing>(null);
+  const [editing, setEditingState] = useState<Editing>(null);
+  // The directory is the parents' to edit; the caregiver reads it (calls and emails still work).
+  const readOnly = data.me?.role === "caregiver";
+  const setEditing = (e: Editing) => !readOnly && setEditingState(e);
 
   const fieldsFor = (k: string) => (k === "places" ? PLACE_FIELDS : k === "contacts" ? CONTACT_FIELDS : ROUTINE_FIELDS);
   const titleFor = (k: string) => ({ places: "place", contacts: "contact", routines: "routine" })[k];
 
   return (
     <>
-      <Section id="places" title="Places" count={data.places.length} onAdd={() => setEditing({ kind: "places", item: { id: newId("place"), name: "", kind: "school" } })}>
+      <Section id="places" title="Places" count={data.places.length} onAdd={readOnly ? undefined : () => setEditing({ kind: "places", item: { id: newId("place"), name: "", kind: "school" } })}>
         {data.places.map((p) => (
           <Card key={p.id} className="p-4">
             <button type="button" className="block w-full text-left" onClick={() => setEditing({ kind: "places", item: p })}>
@@ -69,7 +72,7 @@ export function DirectorySections() {
         ))}
       </Section>
 
-      <Section id="contacts" title="Contacts" count={data.contacts.length} onAdd={() => setEditing({ kind: "contacts", item: { id: newId("contact"), name: "", role: "", kidIds: [] } })}>
+      <Section id="contacts" title="Contacts" count={data.contacts.length} onAdd={readOnly ? undefined : () => setEditing({ kind: "contacts", item: { id: newId("contact"), name: "", role: "", kidIds: [] } })}>
         <Card className="divide-y divide-line">
           {data.contacts.map((c) => (
             <button key={c.id} type="button" className="block w-full px-4 py-3 text-left" onClick={() => setEditing({ kind: "contacts", item: c })}>
@@ -103,7 +106,7 @@ export function DirectorySections() {
         </Card>
       </Section>
 
-      <Section id="routines" title="Drop-off / Pick-up" count={data.routines.length} onAdd={() => setEditing({ kind: "routines", item: { id: newId("r"), kidId: "max", label: "Drop-off", detail: "" } })}>
+      <Section id="routines" title="Drop-off / Pick-up" count={data.routines.length} onAdd={readOnly ? undefined : () => setEditing({ kind: "routines", item: { id: newId("r"), kidId: "max", label: "Drop-off", detail: "" } })}>
         <Card className="divide-y divide-line">
           {data.routines.map((r) => (
             <button key={r.id} type="button" className="block w-full px-4 py-3 text-left" onClick={() => setEditing({ kind: "routines", item: r })}>
@@ -141,9 +144,9 @@ export function DirectorySections() {
   );
 }
 
-function Section({ id, title, count, onAdd, children }: { id: string; title: string; count: number; onAdd: () => void; children: React.ReactNode }) {
+function Section({ id, title, count, onAdd, children }: { id: string; title: string; count: number; onAdd?: () => void; children: React.ReactNode }) {
   return (
-    <Collapsible id={id} title={title} count={count} defaultOpen={false} actions={<TextAction onClick={onAdd}>+ Add</TextAction>}>
+    <Collapsible id={id} title={title} count={count} defaultOpen={false} actions={onAdd && <TextAction onClick={onAdd}>+ Add</TextAction>}>
       <div className="space-y-2">{children}</div>
     </Collapsible>
   );

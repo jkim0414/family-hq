@@ -145,15 +145,21 @@ export async function getWorkBlocks(p: Parent, from: Date, to: Date): Promise<Wo
 }
 
 /** Human-readable schedule by day, in Pacific time — for the assistant. */
-export function formatBlocks(blocks: WorkBlock[]): string {
+/**
+ * One line per day. With availabilityOnly (for the caregiver), no titles — just when the parent
+ * is busy, blocked, commuting (an office day), traveling, or out.
+ */
+export function formatBlocks(blocks: WorkBlock[], opts: { availabilityOnly?: boolean } = {}): string {
   if (!blocks.length) return "(nothing on the work calendar)";
+  const label = (b: WorkBlock) => (b.outOfOffice ? "out of office" : b.trip ? "traveling" : b.travel ? "commute (office day)" : b.hold ? "blocked" : "busy");
   const byDay = new Map<string, string[]>();
   for (const b of blocks) {
     const s = utcToWall(new Date(b.start), HOME_TZ);
     const e = utcToWall(new Date(b.end), HOME_TZ);
     const day = b.allDay ? b.start.slice(0, 10) : s.date;
     const tag = b.outOfOffice ? " (OUT)" : b.trip ? " (hold: trip travel)" : b.travel ? " (hold: commute — office day)" : b.hold ? " (hold)" : "";
-    const line = b.allDay ? `all day — ${b.title}${tag}` : `${fmt12(s.time)}–${fmt12(e.time)} ${b.title}${tag}`;
+    const what = opts.availabilityOnly ? label(b) : `${b.title}${tag}`;
+    const line = b.allDay ? `all day — ${what}` : `${fmt12(s.time)}–${fmt12(e.time)} ${what}`;
     (byDay.get(day) || byDay.set(day, []).get(day)!).push(line);
   }
   return [...byDay.entries()]

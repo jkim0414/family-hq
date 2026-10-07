@@ -10,6 +10,10 @@
       "destination": "/api/router?path=file&id=:id"
     },
     {
+      "source": "/takeover/:token",
+      "destination": "/api/router?path=takeover&token=:token"
+    },
+    {
       "source": "/((?!api/|assets/|.*\\..*).*)",
       "destination": "/index.html"
     }

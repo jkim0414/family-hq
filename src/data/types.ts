@@ -132,7 +132,9 @@ export interface CalEvent {
   /** The location string travelMin was computed for — recomputed when the location changes. */
   travelFor?: string;
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
 }
 
 /**
@@ -155,7 +157,7 @@ export interface Schedule {
   id: string;
   title: string; // short label, e.g. "Monthly spending recap"
   instruction: string; // what Kimi should do when it fires
-  owner: "alex" | "sam"; // who asked — they get the result
+  owner: Member; // who asked — they get the result
   notify: "owner" | "both";
   channel: Channel; // where the asker was when they set it up
   /** The chat thread it runs in and reports to (default: the family chat). */
@@ -169,12 +171,16 @@ export interface Schedule {
   lastRunAt?: string;
   runs?: number;
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
 }
 
 /** One purchase, from a receipt in a parent's inbox (or a checkout Kimi completed). */
+export type SpendCategory = "groceries" | "dining" | "kids" | "household" | "shopping" | "travel" | "health" | "subscriptions" | "gifts" | "other";
 export interface Purchase {
   id: string;
+  category?: SpendCategory;
   date: string; // YYYY-MM-DD
   merchant: string;
   amount: number; // in `currency`
@@ -190,7 +196,9 @@ export interface Purchase {
   sourceKey?: string;
   createdAt: string;
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
 }
 
 // A structured change to family metadata (kid info, directory, routines).
@@ -229,9 +237,48 @@ export interface ProfilePerson {
   /** Venmo username, for one-tap payments the parent completes in Venmo. */
   venmo?: string;
 }
+/** What a household fact is about (see src/data/facts.ts for labels and order). */
+export type FactTopic = "health" | "food" | "school" | "activities" | "childcare" | "work" | "home" | "travel" | "vendors" | "gifts" | "other";
+/** One standing fact Kimi works from ("Ava: swim lessons Saturdays at 9"). Updated in place, never appended twice. */
+export interface Fact {
+  id: string;
+  topic: FactTopic;
+  /** Who it's about: member/kid ids ("theo", "sam"); absent = the household. */
+  about?: string[];
+  text: string;
+  updatedAt: string;
+}
 export interface HouseholdProfile {
-  sections: { key: string; title: string; body: string }[]; // free-text facts (allergies, vendors, work, home…)
+  facts: Fact[];
   people: ProfilePerson[]; // friends, relatives, service providers
+  /** Old free-text sections; read once into facts (normalizeProfile) and no longer written. */
+  sections?: { key: string; title: string; body: string }[];
+}
+
+/** A frequent-flyer / hotel loyalty account ("Delta SkyMiles", "1234567890"). Not a secret. */
+export interface LoyaltyAccount {
+  program: string;
+  number: string;
+}
+/**
+ * One person's travel card, as the app and Kimi see it. The passport and Known Traveler numbers
+ * are stored encrypted and only ever shown as their last four; Kimi fills them into a booking
+ * page without seeing them.
+ */
+export interface Traveler {
+  id: string; // person id (alex, sam, grandma, max, …)
+  /** Exactly as on their ID / passport. */
+  firstName?: string;
+  middleName?: string;
+  lastName?: string;
+  dob?: string; // YYYY-MM-DD
+  gender?: "M" | "F" | "X";
+  seat?: "window" | "aisle" | "any";
+  notes?: string;
+  loyalty: LoyaltyAccount[];
+  ktn?: { last4: string };
+  passport?: { last4: string; country?: string; expires?: string };
+  updatedAt?: string;
 }
 
 export interface Todo {
@@ -247,13 +294,20 @@ export interface Todo {
   source?: Source;
   commId?: string;
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
 }
 
 // ── Agent tasks ──────────────────────────────────────────────────────────────
 // A task is a persistent conversation thread the assistant works on: the shared
 // family chat ("task-main") plus any long-running jobs it spawns. The raw model
 // thread is opaque to the client; `log` is the human-readable transcript.
+/** The parents (full access). */
+export type ParentId = "alex" | "sam";
+/** Everyone who uses Kimi: the parents and the caregiver. */
+export type Member = ParentId | "grandma";
+
 export type TaskStatus = "open" | "running" | "waiting" | "blocked" | "done" | "failed" | "cancelled";
 /** Where a message came from / where replies go: the app, a one-on-one text, or the family group text. */
 export type Channel = "app" | "sms" | "group";
@@ -269,7 +323,7 @@ export interface TaskLogEntry {
 
 /** One person's reaction to a chat message (one per person per message). */
 export interface Reaction {
-  by: "alex" | "sam" | "kimi";
+  by: Member | "kimi";
   emoji: string;
   at: string;
 }
@@ -300,6 +354,8 @@ export interface Action {
   title: string; // one line, e.g. 'Email Ms. Rivera re: field trip form'
   summary: string; // why / what it accomplishes
   payload: EmailPayload | StepPayload;
+  /** The chat it came from (where the app shows its card). */
+  thread?: string;
   createdAt: string;
   decidedAt?: string;
   decidedBy?: string;
@@ -308,9 +364,13 @@ export interface Action {
   error?: string;
   taskId?: string;
   requestedBy: "alex" | "sam" | "agent";
+  /** A caregiver who asked for this (e.g. Grandma's purchase): she sees its status; a parent decides. */
+  requester?: Member;
   channel: Channel;
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
 }
 
 export interface AuditEntry {
@@ -321,7 +381,9 @@ export interface AuditEntry {
   by?: string;
   ref?: string; // action/file id
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
 }
 
 // A rendered page the assistant produced (a comparison, a plan, an itinerary).
@@ -336,7 +398,15 @@ export interface FileDoc {
   shareToken?: string;
   taskId?: string;
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
+  /** The chat it was made in (where the app shows it). */
+  thread?: string;
+  /** Earlier versions, oldest first (a revised plan updates its file instead of making a "v2"). */
+  versions?: { title: string; markdown: string; updatedAt: string }[];
+  /** The calendar event it's for (its notes link here). */
+  eventId?: string;
 }
 
 export interface Task {
@@ -353,11 +423,17 @@ export interface Task {
   /** Why the safety check last blocked a step — shown to the parent with the next approval request. */
   guardNote?: string;
   /** Private to one parent (made in their "Just me" chat); absent = shared with the family. */
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Visible only to these members (an item kept within a shared chat); absent = everyone it'd otherwise reach. */
+  audience?: Member[];
   /** For a background task: the chat thread that started it (results are posted back there). */
   parentThread?: string;
+  /** A parent approved the pending step after seeing the safety check's flag on it (it's their call). */
+  guardOverride?: boolean;
+  /** Waiting for a person to take over the browser (a CAPTCHA): where, why, who may, and the session they opened. */
+  takeover?: { token: string; reason: string; url: string; at: string; to: Member[]; sessionId?: string };
   channel: Channel; // where the last message came from (and where replies go)
-  owner: "alex" | "sam"; // who to notify with proactive replies
+  owner: Member; // who to notify with proactive replies
   createdAt: string;
   updatedAt: string;
   thread: unknown[]; // Anthropic.MessageParam[] — server-side only

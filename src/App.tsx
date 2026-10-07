@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { useData } from "./dataStore";
 import Home from "./views/Home";
-import Chat, { CHAT_SEEN_KEY, CHAT_SEEN_PRIVATE_KEY } from "./views/Chat";
+import Chat, { unreadByThread } from "./views/Chat";
+import { threadsFor } from "./data/threads";
+import type { Member } from "./data/types";
 import Agenda from "./views/Agenda";
 import Household from "./views/Household";
 import Assistant from "./views/Assistant";
@@ -23,21 +25,16 @@ const NAV = [
 ] as const;
 
 /** Unread replies from Kimi since this device last opened Chat. */
-function useChatUnread(active: boolean): number {
+function useChatUnread(active: boolean, me: Member | undefined): number {
   const [n, setN] = useState(0);
   useEffect(() => {
     let stop = false;
     const check = async () => {
-      if (document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible" || !me) return;
       try {
-        // New replies in the family chat plus this parent's private "Just me" thread.
-        const count = async (id: string, key: string) => {
-          const seen = localStorage.getItem(key) || "1970-01-01";
-          const r = await fetch(`/api/tasks?id=${id}&after=${encodeURIComponent(seen)}`, { cache: "no-store" });
-          return r.ok ? Number((await r.json()).unread) || 0 : 0;
-        };
-        const [fam, mine] = await Promise.all([count("task-main", CHAT_SEEN_KEY), count("private", CHAT_SEEN_PRIVATE_KEY)]);
-        if (!stop) setN(fam + mine);
+        // New replies across every chat this member is in.
+        const counts = await unreadByThread(threadsFor(me));
+        if (!stop) setN(Object.values(counts).reduce((a, b) => a + b, 0));
       } catch {
         /* offline */
       }
@@ -48,7 +45,7 @@ function useChatUnread(active: boolean): number {
       stop = true;
       clearInterval(iv);
     };
-  }, [active]);
+  }, [active, me]);
   return active ? 0 : n;
 }
 
@@ -94,10 +91,10 @@ export default function App() {
   const kb = useKeyboard();
   const { data, refresh, loading, authed, logout } = useData();
   const onChat = loc.pathname.startsWith("/chat");
-  const unread = useChatUnread(onChat);
+  const unread = useChatUnread(onChat, data.me?.id as Member | undefined);
   if (authed === "no") return <Login />;
 
-  const needs = needsYouCount(data.actions, data.suggestions, data.todos);
+  const needs = needsYouCount(data.actions, data.suggestions, data.todos, data.me);
   const isActive = (to: string) => (to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(to));
   const badge = (to: string) => (to === "/" ? needs : to === "/chat" ? unread : 0);
 

@@ -1,19 +1,22 @@
+import { recordUsage } from "./usage.js";
+import { renderFacts } from "../../src/data/facts.js";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Attachment } from "./imap.js";
 import { PREP_CONVENTIONS, NAME_COLLISIONS } from "./conventions.js";
 import type { Category, Source, HouseholdProfile } from "../../src/data/types";
 
 /** Compact household-profile summary injected so the model can infer to-dos. */
-export function profileContext(p?: HouseholdProfile | null): string {
-  if (!p || (!p.sections?.length && !p.people?.length)) return "";
-  const secs = (p.sections || []).map((s) => `[${s.title}] ${s.body}`).join("\n");
+export function profileContext(p?: HouseholdProfile | null, opts: { withIds?: boolean } = {}): string {
+  if (!p || (!p.facts?.length && !p.people?.length)) return "";
+  const secs = renderFacts(p.facts || [], opts);
   const ppl = (p.people || []).length
     ? "[People we rely on] " +
       p.people
         .map((x) => `${x.name}${x.phone ? ` (${x.phone})` : ""}${x.note ? ` — ${x.note}` : ""} [${x.relation}]`)
         .join("; ")
     : "";
-  return ["HOUSEHOLD PROFILE (use to infer associated to-dos):", secs, ppl].filter(Boolean).join("\n");
+  const head = opts.withIds ? "HOUSEHOLD FACTS (use them to plan ahead; [ids] are for remember's replaces):" : "HOUSEHOLD PROFILE (use to infer associated to-dos):";
+  return [head, secs, ppl].filter(Boolean).join("\n");
 }
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY
@@ -373,6 +376,7 @@ ${input.text}${note}`,
     tool_choice: { type: "tool", name: "file_item" },
     messages: [{ role: "user", content }],
   });
+  recordUsage(hasPdf ? "classify_pdf" : "classify", model, msg.usage);
 
   const block = msg.content.find((b) => b.type === "tool_use");
   if (!block || block.type !== "tool_use") {
@@ -483,6 +487,7 @@ Quote the decisive source row as evidence. Be strict — a wrong calendar entry 
     tool_choice: { type: "tool", name: "verify_items" },
     messages: [{ role: "user", content }],
   });
+  recordUsage("verify", process.env.CLASSIFY_MODEL_PDF || "claude-sonnet-4-6", msg.usage);
   const block = msg.content.find((b) => b.type === "tool_use");
   if (!block || block.type !== "tool_use") throw new Error("verifier did not return structured output");
   const results = ((block.input as any).results || []) as { idx: number; keep: boolean; evidence: string }[];

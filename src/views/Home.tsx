@@ -23,6 +23,17 @@ export default function Home() {
     const [todayItems, tomorrowItems] = dayGroups(data.events, data.todos, today, 2, true).map((g) => g.items);
     return { todayItems, tomorrowItems, later: dayGroups(data.events, data.todos, addDays(today, 2), 5) };
   }, [data.events, data.todos, today]);
+  // A caregiver's own week: what she's down for (doing a pickup, or it's for her).
+  const me = data.me?.id;
+  const caregiver = data.me?.role === "caregiver";
+  const isMe = (x: string) => !!me && [me, "grandma"].includes(x.toLowerCase());
+  const mine = useMemo(() => {
+    if (!caregiver) return [];
+    const end = addDays(today, 7);
+    return data.events
+      .filter((e) => e.date >= today && e.date < end && [...(e.owner || []), ...(e.people || [])].some(isMe))
+      .sort((a, b) => (a.date + (a.start || "")).localeCompare(b.date + (b.start || "")));
+  }, [data.events, today, caregiver]);
   const dateLine = new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
 
   const renderItem = (it: AgendaItem) =>
@@ -44,6 +55,21 @@ export default function Home() {
         <SectionHeader title="Needs you" />
         <NeedsYou />
       </section>
+
+      {caregiver && (
+        <section>
+          <SectionHeader title="You're on" hint="next 7 days" />
+          {mine.length ? (
+            <div className="space-y-2">
+              {mine.map((e) => (
+                <EventCard key={e.id} e={e} onEdit={() => setEditEvent(e)} />
+              ))}
+            </div>
+          ) : (
+            <Empty>Nothing on your plate this week.</Empty>
+          )}
+        </section>
+      )}
 
       <section>
         <SectionHeader title="Today" />

@@ -1,7 +1,8 @@
 import { getCollection, setCollection, redis } from "./db.js";
+import { memberName } from "./privacy.js";
 import { HOME_TZ } from "../../src/data/tz.js";
 import { nextDate, computeNextRun, describe, todayHome, nowHomeTime, addDays } from "../../src/data/schedule.js";
-import type { Schedule, Repeat, Channel } from "../../src/data/types";
+import type { Schedule, Repeat, Channel, Member } from "../../src/data/types";
 
 export { nextDate, computeNextRun, describe, weekdayIndex, todayHome } from "../../src/data/schedule.js";
 
@@ -35,7 +36,7 @@ async function save(all: Schedule[]): Promise<void> {
 export interface NewSchedule {
   title: string;
   instruction: string;
-  owner: "alex" | "sam";
+  owner: Member;
   notify?: "owner" | "both";
   channel: Channel;
   /** "YYYY-MM-DD" and/or "HH:mm" of the first run; for repeats the date may be omitted (next match from today). */
@@ -44,7 +45,9 @@ export interface NewSchedule {
   repeat?: Repeat;
   /** The chat thread it runs in and reports to; private when started from a "Just me" thread. */
   thread?: string;
-  privateTo?: "alex" | "sam";
+  privateTo?: Member;
+  /** Kept within a shared chat's members. */
+  audience?: Member[];
 }
 
 /** Validate, compute the first run, and store. Throws with a readable message on bad input. */
@@ -82,6 +85,7 @@ export async function createSchedule(input: NewSchedule): Promise<Schedule> {
     channel: input.channel,
     thread: input.thread,
     privateTo: input.privateTo,
+    audience: input.audience,
     time,
     anchor,
     repeat: r,
@@ -124,7 +128,7 @@ export async function cancelSchedule(idOrTitle: string): Promise<Schedule | null
 
 export function fmtSchedule(s: Schedule): string {
   const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleString("en-US", { timeZone: HOME_TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—";
-  const who = s.notify === "both" ? "both parents" : s.owner === "alex" ? "Alex" : "Sam";
+  const who = s.notify === "both" ? "both parents" : memberName(s.owner);
   return `• [${s.id}] ${s.title} — ${describe(s)} · next: ${next} · reports to ${who}`;
 }
 

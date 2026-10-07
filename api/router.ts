@@ -32,6 +32,8 @@ import action from "./_routes/action.js";
 import files from "./_routes/files.js";
 import file from "./_routes/file.js";
 import vault from "./_routes/vault.js";
+import travelers from "./_routes/travelers.js";
+import takeover from "./_routes/takeover.js";
 import push from "./_routes/push.js";
 import gmail from "./_routes/gmail.js";
 import workcal from "./_routes/workcal.js";
@@ -56,6 +58,8 @@ const ROUTES: Record<string, Handler> = {
   files,
   file,
   vault,
+  travelers,
+  takeover,
   push,
   gmail,
   workcal,

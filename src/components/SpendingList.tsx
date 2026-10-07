@@ -1,3 +1,4 @@
+import { SPEND_CATEGORIES } from "../data/spending";
 import { useMemo, useState } from "react";
 import { useData } from "../dataStore";
 import { fmtDate } from "../store";
@@ -11,6 +12,8 @@ const money = (n: number, cur = "USD") => {
   }
 };
 
+const catLabel = (c: string) => (SPEND_CATEGORIES.find((x) => x.id === c)?.label || c).replace(/:.*$/, "");
+
 // The spending log: purchases from order/payment receipts in both parents' inboxes,
 // with the ones Kimi placed marked. A view of receipts — not a bank statement.
 export function SpendingList() {
@@ -18,15 +21,20 @@ export function SpendingList() {
   const [all, setAll] = useState(false);
   const rows = data.spending || [];
   const month = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" }).slice(0, 7);
-  const { monthTotal, kimiTotal, monthCount } = useMemo(() => {
+  const [cat, setCat] = useState<string | null>(null);
+  const { monthTotal, kimiTotal, monthCount, byCat } = useMemo(() => {
     const m = rows.filter((r) => r.date.startsWith(month) && r.currency === "USD");
+    const totals = new Map<string, number>();
+    for (const r of m) totals.set(r.category || "other", (totals.get(r.category || "other") || 0) + r.amount);
     return {
       monthTotal: m.reduce((a, r) => a + r.amount, 0),
       kimiTotal: m.filter((r) => r.byKimi).reduce((a, r) => a + r.amount, 0),
       monthCount: m.length,
+      byCat: [...totals.entries()].sort((a, b) => b[1] - a[1]),
     };
   }, [rows, month]);
-  const shown = all ? rows : rows.slice(0, 25);
+  const filtered = cat ? rows.filter((r) => (r.category || "other") === cat) : rows;
+  const shown = all ? filtered : filtered.slice(0, 25);
 
   return (
     <Collapsible id="spending" title="Spending" count={monthCount} defaultOpen={false} hint="Purchases from receipts in your inboxes, including anything Kimi bought. Not a bank statement.">
@@ -38,6 +46,20 @@ export function SpendingList() {
             This month: <span className="font-semibold text-ink">{money(monthTotal)}</span> across {monthCount} purchase{monthCount === 1 ? "" : "s"}
             {kimiTotal > 0 && <> · Kimi placed {money(kimiTotal)}</>}
           </div>
+          {byCat.length > 1 && (
+            <div className="no-scrollbar -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-0.5">
+              {byCat.map(([c, v]) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setCat((x) => (x === c ? null : c))}
+                  className={`min-h-[32px] shrink-0 rounded-full px-3 text-xs font-medium ${cat === c ? "bg-ink text-surface" : "bg-fill text-ink-2"}`}
+                >
+                  {catLabel(c)} {money(v)}
+                </button>
+              ))}
+            </div>
+          )}
           <Card className="divide-y divide-line">
             {shown.map((r) => (
               <div key={r.id} className="px-4 py-2.5">
@@ -56,9 +78,9 @@ export function SpendingList() {
               </div>
             ))}
           </Card>
-          {rows.length > 25 && (
+          {filtered.length > 25 && (
             <div className="px-1">
-              <TextAction onClick={() => setAll((a) => !a)}>{all ? "Show fewer" : `Show all ${rows.length}`}</TextAction>
+              <TextAction onClick={() => setAll((a) => !a)}>{all ? "Show fewer" : `Show all ${filtered.length}`}</TextAction>
             </div>
           )}
         </div>

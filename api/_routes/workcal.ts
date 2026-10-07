@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../_lib/http.js";
-import { requireUser } from "../_lib/auth.js";
+import { requireParent } from "../_lib/auth.js";
 import { addAudit } from "../_lib/db.js";
 import { getWorkCalConfig, setWorkCalConfig, parseWorkCalInput, getWorkBlocks, type Parent } from "../_lib/workcal.js";
 
@@ -8,7 +8,7 @@ import { getWorkCalConfig, setWorkCalConfig, parseWorkCalInput, getWorkBlocks, t
 // POST /api/workcal { who, value }          → set a parent's work calendar (email if shared, or .ics link)
 // POST /api/workcal { who, remove: true }   → disconnect
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const user = await requireUser(req);
+  const user = await requireParent(req);
   if (!user) return json(res, 401, { error: "unauthorized" });
   res.setHeader("cache-control", "no-store");
   try {

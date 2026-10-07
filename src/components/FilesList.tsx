@@ -6,6 +6,8 @@ export interface FileRow {
   id: string;
   title: string;
   createdAt: string;
+  updatedAt?: string;
+  versions?: number;
   public: boolean;
   url: string;
   privateTo?: string;
@@ -66,7 +68,9 @@ export function FilesList() {
                 </span>
               </div>
               <div className="mt-1 flex items-center gap-1 text-xs text-ink-3">
-                <span className="mr-1">{fmtDateTime(f.createdAt)}</span>
+                <span className="mr-1">
+                  {f.versions ? `Updated ${fmtDateTime(f.updatedAt || f.createdAt)} · ${f.versions + 1} versions` : fmtDateTime(f.createdAt)}
+                </span>
                 <TextAction onClick={() => toggleShare(f)}>{f.public ? "Make private" : "Share link"}</TextAction>
                 {f.public && <TextAction onClick={() => copy(f)}>{copied === f.id ? "Copied ✓" : "Copy link"}</TextAction>}
               </div>

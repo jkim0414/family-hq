@@ -8,6 +8,7 @@ import { fileMessages, type FileInput } from "../_lib/file-mail.js";
 import { runWatch, type WatchStats } from "../_lib/watch.js";
 import { sweepVerifiable } from "../_lib/verify.js";
 import { updateTravelTimes, checkLeaveAlerts } from "../_lib/travel.js";
+import { ensureGroups } from "../_lib/groupsms.js";
 
 // Senders that are infrastructure noise, never school comms.
 const SKIP_SENDERS = [/accounts\.google\.com/i, /no-?reply@google/i, /mailer-daemon/i];
@@ -32,9 +33,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Every later stage is time-gated. Read all the gates in ONE command: this runs
     // every minute, so an idle tick is now smembers + mget (tasks) + this mget.
-    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast, schedulesNext, lastSeen] =
+    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast, schedulesNext, lastSeen, groupsLast] =
       (await redis
-        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last", "schedules_next", "ingest_seen")
+        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last", "schedules_next", "ingest_seen", "groups_last")
         .catch(() => null)) || [];
     const num = (v: unknown) => Number(v || 0);
     // "The heartbeat is running" for the Kimi tab's Setup list — refreshed every 10 minutes, not every tick.
@@ -85,6 +86,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       console.error("travel stage failed", e);
     }
 
+    // Group texts: start any a shared chat should have but doesn't (everyone in it opted in, and
+    // setting it up at their "Y" failed or came before the last person joined). Every 15 min.
+    let groupsMade: string[] = [];
+    try {
+      if (Date.now() - num(groupsLast) >= 15 * 60 * 1000) {
+        await redis.set("groups_last", Date.now());
+        groupsMade = await ensureGroups();
+      }
+    } catch (e) {
+      console.error("group text setup failed", e);
+    }
+
     // Kimi's own inbox is now a manual-forwarding fallback (the parents' inboxes are
     // watched directly), so it doesn't need an IMAP login every minute.
     // Close RSVP / sign-up to-dos that turn out to be done already (hourly).
@@ -97,7 +110,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const lastSchool = num(schoolLast);
     if (Date.now() - lastSchool < 5 * 60 * 1000) {
-      return json(res, 200, { ok: true, fetched: 0, filed: 0, skipped: 0, calendar, tasksRan, watch, verified, travel, leaveAlerts, scheduled, schoolInbox: "not due" });
+      return json(res, 200, { ok: true, fetched: 0, filed: 0, skipped: 0, calendar, tasksRan, watch, verified, travel, leaveAlerts, scheduled, groupsMade, schoolInbox: "not due" });
     }
     await redis.set("school_inbox_last", Date.now());
     const messages = await fetchUnseen(false);

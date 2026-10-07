@@ -1,10 +1,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { waitUntil } from "@vercel/functions";
 import { validTwilioSignature, twilioAuth, readMedia, MEDIA_OK, SMS_WELCOME, SMS_HELP, OPT_OUT_WORDS, type FetchedMedia } from "../_lib/twilio.js";
-import { ensureGroup, closeGroupAfterStop, getGroup, postedToGroup } from "../_lib/groupsms.js";
+import { ensureGroups, closeGroupAfterStop, postedToGroup } from "../_lib/groupsms.js";
 import { userForPhone, sendSms, smsBody, smsConfigured, getSmsOptIn, setSmsOptIn, CONTACT_CARD_URL } from "../_lib/notify.js";
 import { converse, appendExchange } from "../_lib/agent.js";
-import { privateThreadId } from "../_lib/privacy.js";
+import { privateThreadId, isParent } from "../_lib/privacy.js";
 import { runCapture, describeCapture } from "../_lib/capture.js";
 import { latestPending, decideAction } from "../_lib/actions.js";
 import { parseReactionText } from "../_lib/reactions.js";
@@ -54,7 +54,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const word = text.toUpperCase().replace(/[^A-Z]/g, "");
 
   // A family group text also arrives here; the group handler (smsgroup.ts) answers it there.
-  if (!["START", "UNSTOP", "Y"].includes(word) && (await getGroup()) && (await postedToGroup(from, text))) return twiml(res);
+  if (!["START", "UNSTOP", "Y"].includes(word) && (await postedToGroup(from, text, who))) return twiml(res);
   if (OPT_OUT_WORDS.includes(word)) {
     await setSmsOptIn(who, "stopped");
     waitUntil(closeGroupAfterStop(who));
@@ -81,9 +81,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         (async () => {
           await new Promise((r) => setTimeout(r, 3000));
           await sendSms(from, "Here's my contact card. Tap it and save me so my photo shows up next to my texts! ✨", CONTACT_CARD_URL).catch((e) => console.error("contact card failed", e));
-          // Once both parents are enrolled, start the family group text (no-op until then).
+          // Start the group texts for every shared chat whose members have now all opted in.
           await new Promise((r) => setTimeout(r, 3000));
-          await ensureGroup().catch((e) => console.error("group text setup failed", e));
+          await ensureGroups().catch((e) => console.error("group text setup failed", e));
         })()
       );
       return twiml(
@@ -141,7 +141,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // not a shortcut: carriers treat CANCEL as an opt-out keyword, and "yes" isn't
   // either: Twilio reserves YES as an opt-in keyword.)
   const cmd = text.toLowerCase();
-  if (/^(approve|send|ok|decline|no)\b/.test(cmd)) {
+  if (isParent(who) && /^(approve|send|ok|decline|no)\b/.test(cmd)) {
     const pending = await latestPending(who);
     if (!pending) return twiml(res, `<Message>${smsBody("Nothing is waiting for approval right now.")}</Message>`);
     const approve = /^(approve|send|ok)/.test(cmd);

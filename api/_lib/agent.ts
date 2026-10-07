@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   getCollection,
@@ -13,12 +14,19 @@ import {
   acquireTaskLock,
   releaseTaskLock,
   redis,
+  getFile,
+  listFileIds,
 } from "./db.js";
 import { profileContext } from "./classify.js";
+import { searchFlights, searchHotels, searchPlaces } from "./search.js";
+import { recordUsage } from "./usage.js";
+import { personName } from "../../src/data/people.js";
+import { TRAVELER_IDS, listTravelers, saveTraveler, travelSecret, travelersText, type TravelerPatch } from "./travelers.js";
+import { FACT_TOPIC_IDS, isFactTopic, newFactId, topicLabel, factText } from "../../src/data/facts.js";
 import { createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "./calendar.js";
 import { notify, deliver } from "./notify.js";
 import { proposeAction } from "./actions.js";
-import { createFile, fileUrl } from "./files.js";
+import { createFile, updateFile, fileUrl } from "./files.js";
 import { searchMail, inboxConfigured } from "./imap.js";
 import { gmailConnected, searchGmail } from "./gmail.js";
 import * as web from "./browser.js";
@@ -27,7 +35,8 @@ import { getWorkCalConfig, getWorkBlocks, formatBlocks } from "./workcal.js";
 import { listCredentials, getCredentialField, credentialsAvailable } from "./vault.js";
 import { listOpCards, getOpCard, opConfigured, BUSINESS_CARD_RE } from "./onepassword.js";
 import { guardCheck, pageFacts } from "./guard.js";
-import { canSee, threadOwner, getPrivateNotes, addPrivateNote, type Viewer } from "./privacy.js";
+import { canSee, canSeeAll, canSeeTask, threadOwner, threadMembers, getPrivateNotes, addPrivateNote, isParent, memberName, privateThreadId, PARENTS, type Viewer } from "./privacy.js";
+import { threadFor } from "../../src/data/threads.js";
 import { summarizeSpending } from "./receipts.js";
 import { dayOutlook, windowWeather } from "./weather.js";
 import { leaveByTime } from "./travel.js";
@@ -41,7 +50,7 @@ import { PREP_CONVENTIONS, NAME_COLLISIONS } from "./conventions.js";
 import { REACTIONS, setReaction } from "./reactions.js";
 import { sendReactionSms, getSmsOptIn, phoneFor } from "./notify.js";
 import { sendGroupReaction } from "./groupsms.js";
-import type { Task, TaskLogEntry, CalEvent, Todo, Channel, StepPayload } from "../../src/data/types";
+import type { Task, TaskLogEntry, CalEvent, Todo, Channel, StepPayload, Member, FileDoc } from "../../src/data/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The assistant's agent loop. Runs a persistent task thread against Claude with
@@ -120,9 +129,9 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
         endDate: { type: "string", description: "YYYY-MM-DD if a multi-day all-day span" },
         location: { type: "string" },
         notes: { type: "string", description: "What to bring/wear, confirmation numbers, details" },
-        people: { type: "array", items: { type: "string" }, description: 'Who it is FOR: "max","theo","ava","alex","sam" or a guest name' },
-        owner: { type: "array", items: { type: "string" }, description: 'Who is RESPONSIBLE: "alex" and/or "sam"' },
-        private: { type: "boolean", description: "Only in a private (Just me) chat: keep this event visible to this parent only — not on the shared Google Calendar, not in the family chat or digests." },
+        people: { type: "array", items: { type: "string" }, description: 'Who it is FOR: "max","theo","ava","alex","sam","grandma" or a guest name' },
+        owner: { type: "array", items: { type: "string" }, description: 'Who is RESPONSIBLE: "alex", "sam", and/or "grandma" (Grandma — e.g. she\'s doing the pickup)' },
+        private: { type: "boolean", description: "Keep this within the chat it came from: in a Just-me chat, visible to that member only; in the family chat, between the parents (not Grandma). Private events stay off the shared Google Calendar." },
       },
       required: ["title", "date"],
     },
@@ -172,9 +181,9 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
         detail: { type: "string" },
         due: { type: "string", description: "YYYY-MM-DD, optional" },
         people: { type: "array", items: { type: "string" } },
-        owner: { type: "array", items: { type: "string" } },
+        owner: { type: "array", items: { type: "string" }, description: '"alex", "sam", and/or "grandma" (Grandma)' },
         priority: { type: "string", enum: ["normal", "high"] },
-        private: { type: "boolean", description: "Only in a private (Just me) chat: keep this to-do visible to this parent only." },
+        private: { type: "boolean", description: "Keep this within the chat it came from (Just me: that member only; family chat: the parents, not Grandma)." },
       },
       required: ["title"],
     },
@@ -190,14 +199,18 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     name: "remember",
     description:
-      "Save a durable household fact to the family's profile so future conversations know it (a preference, an allergy update, a standing arrangement, a vendor, a rule). Call this whenever a parent tells you something worth remembering long-term — not for one-off events.",
+      "Save a durable household fact so future conversations know it (a preference, an allergy update, a standing arrangement, a vendor, a rule) — not for one-off events. Facts are short and typed. When it CHANGES a fact you already have (see HOUSEHOLD FACTS, ids in brackets), pass replaces with that id instead of adding a second one; forget: true with replaces retires a fact that's no longer true. Travel details (loyalty numbers, seat preference, legal name, date of birth) go in save_traveler_info instead.",
     input_schema: {
       type: "object",
       properties: {
-        fact: { type: "string", description: "One clear sentence." },
+        fact: { type: "string", description: "One clear sentence that stands on its own (name who it's about: \"Ava's swim lessons are Saturdays at 9\")." },
+        topic: { type: "string", enum: FACT_TOPIC_IDS, description: "health, food, school, activities, childcare, work, home, travel, vendors, gifts, or other." },
+        about: { type: "array", items: { type: "string" }, description: 'Who it\'s about: "alex","sam","grandma","max","theo","ava" (omit for the household).' },
+        replaces: { type: "string", description: "The id of the fact this updates (from HOUSEHOLD FACTS)." },
+        forget: { type: "boolean", description: "With replaces: remove that fact (it's no longer true)." },
         private: { type: "boolean", description: "Only in a private (Just me) chat: save it as this parent's private note (e.g. a gift idea) instead of a household fact both parents see." },
       },
-      required: ["fact"],
+      required: ["fact", "topic"],
     },
   },
   {
@@ -224,7 +237,7 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
           },
           required: ["freq"],
         },
-        notify: { type: "string", enum: ["me", "both"], description: "Who gets the result: the parent asking (default) or both parents." },
+        notify: { type: "string", enum: ["me", "both"], description: "Who gets the result: the person asking (default), or \"both\" = everyone in this chat (in the family chat, both parents)." },
       },
       required: ["instruction"],
     },
@@ -270,12 +283,22 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     name: "create_file",
     description:
-      "Turn a substantial piece of work — a comparison, a plan, an itinerary, research findings, a checklist — into a File: a rendered page with a link the parents can open or share. Call this instead of pasting long structured content into chat. Markdown (headings, tables, lists, links) renders well.",
+      "Turn a substantial piece of work — a comparison, a plan, an itinerary, research findings, a checklist — into a File: a rendered page with a link the parents can open or share. Call this instead of pasting long structured content into chat. Markdown (headings, tables, lists, links) renders well. REVISING a file you made before (a new draft of the plan, updated options)? Pass replaces with its id: same link, the old version stays in its history — never make a \"v2\" file. For a trip or event, pass eventId so its calendar entry links to the file.",
     input_schema: {
       type: "object",
-      properties: { title: { type: "string" }, markdown: { type: "string" } },
+      properties: {
+        title: { type: "string", description: "What it is, without version numbers." },
+        markdown: { type: "string" },
+        replaces: { type: "string", description: "Id of the file this revises (from list_files or an earlier result)." },
+        eventId: { type: "string", description: "The calendar event it's for (evt-…)." },
+      },
       required: ["title", "markdown"],
     },
+  },
+  {
+    name: "list_files",
+    description: "Files made so far (newest first): id, title, date, versions, linked event. Use to find a file to revise (create_file replaces) or to share again.",
+    input_schema: { type: "object", properties: { query: { type: "string", description: "Words in the title (optional)" } } },
   },
   {
     name: "search_email",
@@ -301,6 +324,7 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
         from: { type: "string", description: "YYYY-MM-DD (default: first of this month)" },
         to: { type: "string", description: "YYYY-MM-DD (default: today)" },
         merchant: { type: "string", description: "Filter by merchant or item, e.g. 'Amazon', 'tuition'" },
+        category: { type: "string", enum: ["groceries", "dining", "kids", "household", "shopping", "travel", "health", "subscriptions", "gifts", "other"] },
       },
     },
   },
@@ -352,12 +376,93 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
       "Read a specific page by URL — an invitation (Paperless Post, Evite, Punchbowl…), a sign-up sheet, a school notice, a Google Doc — including ones that need JavaScript. Use it on links found in events' notes or emails to check details or status (e.g. whether the family already RSVP'd). Returns the page text.",
     input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
   },
+  {
+    name: "search_flights",
+    description:
+      "Search flights (Google Flights data) in seconds — use this, not a browser task, to compare options: times, nonstop vs. connections, aircraft, fares. One-way, or round trip with returnDate (outbound list shows the round-trip total; pass an option's [handle] as next to see its return flights, and a return's handle to see where to book). If the household facts name a preferred airline, pass it in airlines (e.g. [\"DL\"]) unless they ask to compare. Results are research; booking happens on the airline's own site (a browser task, signed in).",
+    input_schema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Airport code(s): JFK, or JFK,LGA,EWR" },
+        to: { type: "string", description: "Airport code(s): MCO, or MCO,TPA" },
+        date: { type: "string", description: "YYYY-MM-DD departure" },
+        returnDate: { type: "string", description: "YYYY-MM-DD, for a round trip" },
+        adults: { type: "integer" },
+        children: { type: "integer" },
+        cabin: { type: "string", enum: ["economy", "premium_economy", "business", "first"] },
+        nonstop: { type: "boolean" },
+        airlines: { type: "array", items: { type: "string" }, description: 'IATA codes, e.g. ["DL"]' },
+        maxPrice: { type: "integer" },
+        next: { type: "string", description: "A [handle] from an earlier result (same from/to/dates)." },
+      },
+      required: ["from", "to", "date"],
+    },
+  },
+  {
+    name: "search_hotels",
+    description: "Search hotels (Google Hotels data): nightly and total price, class, rating, amenities. For research; booking is a browser task.",
+    input_schema: {
+      type: "object",
+      properties: {
+        where: { type: "string", description: "City, neighborhood, or 'hotels near <place>'" },
+        checkIn: { type: "string", description: "YYYY-MM-DD" },
+        checkOut: { type: "string", description: "YYYY-MM-DD" },
+        adults: { type: "integer" },
+        childAges: { type: "array", items: { type: "integer" }, description: "Each child's age (from their birthdays), e.g. [10, 8]" },
+        maxPrice: { type: "integer", description: "Per night, USD" },
+        sort: { type: "string", enum: ["price", "rating"] },
+      },
+      required: ["where", "checkIn", "checkOut"],
+    },
+  },
+  {
+    name: "search_places",
+    description: "Look up local businesses and places (Google Maps): address, phone, hours, rating, website. Faster than browsing for 'is the bakery open Sunday', 'urgent care near home', 'phone number for…'.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string" }, near: { type: "string", description: "Area: a city or neighborhood (default: the query as written)" } },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_travelers",
+    description:
+      "The family's travel cards: legal name as on ID, date of birth, gender, seat preference, loyalty numbers (airline and hotel programs), and whether a passport / Known Traveler Number is on file (last four, passport expiry). Use when planning or booking travel — check passports expire > 6 months after an international trip.",
+    input_schema: { type: "object", properties: { who: { type: "array", items: { type: "string" }, description: "Person ids (default: everyone you may see)" } } },
+  },
+  {
+    name: "save_traveler_info",
+    description:
+      "Save travel details someone tells you to their travel card: a loyalty number (\"my frequent-flyer number is AB123456\"), seat preference, legal name, date of birth, gender, notes. Passport and Known Traveler numbers are NOT saved from chat — ask them to enter those in the app (Household → Travel), where they're stored encrypted.",
+    input_schema: {
+      type: "object",
+      properties: {
+        person: { type: "string", description: "Person id: alex, sam, grandma, max, theo, ava" },
+        loyaltyProgram: { type: "string", description: "e.g. Delta SkyMiles, Hilton Honors, Hertz Gold Plus Rewards" },
+        loyaltyNumber: { type: "string" },
+        seat: { type: "string", enum: ["window", "aisle", "any"] },
+        firstName: { type: "string" },
+        middleName: { type: "string" },
+        lastName: { type: "string" },
+        dob: { type: "string", description: "YYYY-MM-DD" },
+        gender: { type: "string", enum: ["M", "F", "X"] },
+        notes: { type: "string" },
+      },
+      required: ["person"],
+    },
+  },
   { type: "web_search_20260209", name: "web_search", max_uses: 6 },
   { type: "web_fetch_20260209", name: "web_fetch", max_uses: 6 },
 ];
 
 // Only in the family chat: hand a job to a background browser task.
 const CHAT_ONLY_TOOLS: Anthropic.Messages.ToolUnion[] = [
+  {
+    name: "ask_grandma",
+    description:
+      "Ask Grandma (who lives with the family and covers for the kids) something directly — e.g. whether she can take Thursday's pickup — instead of telling the parent to ask her. It goes to the chat Grandma shares with the parent you're talking to (so they see her answer there), and to her phone. Write it as yourself: short, warm, with the details she needs (day, time, which kids, why). Only from a parent's chat.",
+    input_schema: { type: "object", properties: { message: { type: "string" } }, required: ["message"] },
+  },
   {
     name: "react",
     description:
@@ -367,7 +472,7 @@ const CHAT_ONLY_TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     name: "start_browser_task",
     description:
-      "Hand a job that needs a real web browser to a background task: registering for a camp/class, booking or cancelling something, filling a form on a website, checking an account, changing a subscription. The task runs on its own, pauses to ask the parents before anything irreversible (payments, bookings, submissions), and messages them when done. Call this when the request can't be done with the other tools. Give a complete, self-contained goal — the task cannot ask you follow-up questions.",
+      "Hand a job that needs a real web browser to a background task: registering for a camp/class, booking or cancelling something, filling a form on a website, checking an account, changing a subscription. The task runs on its own, pauses to ask the parents before anything irreversible (payments, bookings, submissions), and messages them when done. Call this when the request can't be done with the other tools. Give a complete, self-contained goal — the task cannot ask you follow-up questions. Put in only what the parent said or what you verified; never fill gaps with guesses (a product's form, size, or model from a cut-off email subject). For \"my usual X\" / reorders, quote the parent and write \"identify it from order history\" — that history is the source of truth. If you pass a lead you haven't confirmed, label it \"unverified: …\".",
     input_schema: {
       type: "object",
       properties: {
@@ -455,6 +560,22 @@ const BROWSER_TOOLS: Anthropic.Messages.ToolUnion[] = [
       type: "object",
       properties: { n: { type: "integer" }, name: { type: "string" }, field: { type: "string", enum: ["username", "password", "otp"] } },
       required: ["n", "name", "field"],
+    },
+  },
+  {
+    name: "request_takeover",
+    description:
+      "When a page needs a real person — a CAPTCHA, \"I'm not a robot\" box, \"press and hold\", puzzle, or a check that you're human — call this instead of trying to solve it. The parent gets a link to take over this browser on their phone, solve it, and hand it back; you're woken in the same browser to continue. Ask once per check; then stop and wait.",
+    input_schema: { type: "object", properties: { reason: { type: "string", description: "What's in the way, in a few words: 'Amazon's \"I'm not a robot\" check at sign-in'." } }, required: ["reason"] },
+  },
+  {
+    name: "browse_fill_travel_doc",
+    description:
+      "Enter someone's passport number or Known Traveler Number (TSA PreCheck) into element [n] WITHOUT you seeing it — for a booking or check-in form. Their card must have it on file (get_travelers shows '…1234' when it does). Fill name, date of birth, and loyalty numbers yourself from get_travelers.",
+    input_schema: {
+      type: "object",
+      properties: { n: { type: "integer" }, person: { type: "string" }, field: { type: "string", enum: ["passport", "ktn"] } },
+      required: ["n", "person", "field"],
     },
   },
   {
@@ -565,12 +686,59 @@ const fmtTodo = (t: Todo) =>
     t.detail ? ` · ${t.detail.slice(0, 100)}` : ""
   }`;
 
+// ── Who a conversation is for ────────────────────────────────────────────────
+
+/** The chat a task belongs to: itself, or (a browser task) the chat that started it. */
+function threadOf(task: Task): string {
+  return task.kind === "browser" ? task.parentThread || (task.privateTo ? privateThreadId(task.privateTo) : MAIN_TASK_ID) : task.id;
+}
+
+/** The members of a task's chat — whose view Kimi works within. */
+export function membersOf(task: Task): Member[] {
+  // A chat marked private to one member is theirs alone, whatever its id.
+  if ((task.kind || "chat") === "chat" && task.privateTo) return [task.privateTo];
+  return threadMembers(threadOf(task));
+}
+
+/** How far something made in this chat reaches: one member's private, or the chat's members. */
+function artifactScope(members: Member[], task: Task): { privateTo?: Member; audience?: Member[] } {
+  if (members.length === 1) return { privateTo: members[0] };
+  return threadOf(task) === MAIN_TASK_ID ? {} : { audience: [...members] };
+}
+
+/** private: true — keep an event/to-do within this chat (one member, or its members). */
+function keepWithin(item: { privateTo?: Member; audience?: Member[]; owner?: string[] }, members: Member[]): void {
+  if (members.length === 1) {
+    item.privateTo = members[0];
+    item.owner = [members[0]];
+  } else item.audience = [...members];
+}
+
+const sameScope = (a: { privateTo?: Member; audience?: Member[] }, b: { privateTo?: Member; audience?: Member[] }) =>
+  (a.privateTo || "") === (b.privateTo || "") && [...(a.audience || [])].sort().join() === [...(b.audience || [])].sort().join();
+
+/** The Google Calendar is the parents' shared one: only events both parents may see go on it. */
+const onSharedCalendar = (e: { privateTo?: Member; audience?: Member[] }) => !e.privateTo && (!e.audience || PARENTS.every((p) => e.audience!.includes(p)));
+
+/** " PRIVATELY (…)" note for a kept item's confirmation. */
+function keptNote(x: { privateTo?: Member; audience?: Member[] }): string {
+  if (x.privateTo) return ` PRIVATELY (only ${memberName(x.privateTo)} sees it; kept off the shared Google Calendar)`;
+  if (x.audience) return ` (only ${x.audience.map(memberName).join(" & ")} see it${onSharedCalendar(x) ? "" : "; kept off the shared Google Calendar"})`;
+  return "";
+}
+
 async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> {
-  // Who this conversation is visible to: the family chat sees only shared items; a parent's
-  // private thread also sees that parent's private items.
-  const viewer: Viewer = ctx.task.privateTo || "family";
-  const vis = <T extends { privateTo?: "alex" | "sam" }>(xs: T[]) => xs.filter((x) => canSee(x, viewer));
+  // Who this conversation is for: the members of its chat (a browser task: the chat that started
+  // it). Kimi only uses what every one of them may see, and "private" keeps an item within them.
   const { task } = ctx;
+  const members = membersOf(task);
+  const threadId = threadOf(task);
+  const caregiverHere = members.some((m) => !isParent(m));
+  const seeable = (x: { privateTo?: Member; audience?: Member[] } | null | undefined) => canSeeAll(x, members);
+  const vis = <T extends { privateTo?: Member; audience?: Member[] }>(xs: T[]) => xs.filter(seeable);
+  // How far an artifact (file, schedule, approval, browser task) made here reaches.
+  const scope = artifactScope(members, task);
+  const viewer: Viewer = members.length === 1 ? members[0] : "family";
   const today = todayPT();
   switch (name) {
     case "get_upcoming": {
@@ -651,19 +819,15 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         owner: Array.isArray(input?.owner) ? input.owner : [],
         source: "other",
       };
-      if (input?.private === true) {
-        if (!task.privateTo) return "error: private items can only be made in a parent's private (Just me) chat — this is the family chat, which both parents see.";
-        evt.privateTo = task.privateTo;
-        evt.owner = [task.privateTo];
-      }
+      if (input?.private === true) keepWithin(evt, members);
       if (!evt.title || !/^\d{4}-\d{2}-\d{2}$/.test(evt.date)) return "error: title and date (YYYY-MM-DD) required";
       // Already on the calendar (from an email, the calendar mirror, or earlier in
       // chat)? Update that one instead of adding a second copy.
       const events = await getCollection("events");
-      const existing = events.find((x) => canSee(x, viewer) && (x.privateTo || undefined) === evt.privateTo && (eventsSimilar(x, evt) || (x.date === evt.date && !!x.start && x.start === evt.start && titlesSimilar(x.title, evt.title))));
+      const existing = events.find((x) => seeable(x) && sameScope(x, evt) && (eventsSimilar(x, evt) || (x.date === evt.date && !!x.start && x.start === evt.start && titlesSimilar(x.title, evt.title))));
       if (existing) {
         mergeEventDetails(existing, { ...evt, title: undefined, people: evt.people?.length ? evt.people : undefined, owner: evt.owner?.length ? evt.owner : undefined });
-        if (!existing.privateTo) {
+        if (onSharedCalendar(existing)) {
           try {
             await updateCalendarEvent(existing, { silent: true });
           } catch (e) {
@@ -673,8 +837,8 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         await setCollection("events", events);
         return `Already on the calendar — updated it instead of adding a duplicate: ${fmtEvent(existing)}`;
       }
-      // Private events stay in the app: the Google Calendar is shared with the other parent.
-      if (!evt.privateTo) {
+      // Kept events stay in the app unless both parents are in on them: the Google Calendar is the parents' shared one.
+      if (onSharedCalendar(evt)) {
         try {
           const gcalId = await createCalendarEvent(evt);
           if (gcalId) evt.gcalId = gcalId;
@@ -683,11 +847,11 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         }
       }
       await appendItems("events", [evt]);
-      return `Added${evt.privateTo ? " PRIVATELY (only this parent sees it; kept off the shared Google Calendar)" : ""}: ${fmtEvent(evt)}${evt.gcalId ? " (on Google Calendar)" : ""}`;
+      return `Added${keptNote(evt)}: ${fmtEvent(evt)}${evt.gcalId ? " (on Google Calendar)" : ""}`;
     }
     case "update_event": {
       const events = await getCollection("events");
-      const evt = events.find((e) => e.id === input?.id && canSee(e, viewer));
+      const evt = events.find((e) => e.id === input?.id && seeable(e));
       if (!evt) return `error: no event with id ${input?.id}`;
       const set = input?.set || {};
       if (set.title) evt.title = String(set.title).trim();
@@ -707,7 +871,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       }
       if (set.location !== undefined) evt.location = set.location || undefined;
       if (set.notes !== undefined) evt.prep = set.notes || undefined;
-      if (!evt.privateTo) {
+      if (onSharedCalendar(evt)) {
         try {
           const gcalId = await updateCalendarEvent(evt, { silent: true });
           if (gcalId) evt.gcalId = gcalId;
@@ -722,7 +886,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const ids: string[] = Array.isArray(input?.ids) ? input.ids.map(String) : [];
       if (!ids.length) return "error: ids required";
       const events = await getCollection("events");
-      const gone = events.filter((e) => ids.includes(e.id) && canSee(e, viewer));
+      const gone = events.filter((e) => ids.includes(e.id) && seeable(e));
       if (!gone.length) return "error: no matching events";
       for (const e of gone) if (e.gcalId) await deleteCalendarEvent(e.gcalId).catch(() => {});
       const goneIds = new Set(gone.map((e) => e.id));
@@ -742,25 +906,30 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         done: false,
         source: "other",
       };
-      if (input?.private === true) {
-        if (!task.privateTo) return "error: private items can only be made in a parent's private (Just me) chat — this is the family chat, which both parents see.";
-        todo.privateTo = task.privateTo;
-        todo.owner = [task.privateTo];
-      }
+      if (input?.private === true) keepWithin(todo, members);
       if (!todo.title) return "error: title required";
-      const dup = vis(await getCollection("todos")).find((x) => !x.done && (x.privateTo || undefined) === todo.privateTo && todosSimilar(x, todo));
+      const dup = vis(await getCollection("todos")).find((x) => !x.done && sameScope(x, todo) && todosSimilar(x, todo));
       if (dup) return `Already tracked — not adding a duplicate: ${fmtTodo(dup)}`;
       await appendItems("todos", [todo]);
-      return `Added${todo.privateTo ? " PRIVATE" : ""} to-do: ${fmtTodo(todo)}`;
+      return `Added${keptNote(todo)} to-do: ${fmtTodo(todo)}`;
     }
     case "complete_todo": {
       const todos = await getCollection("todos");
       const q = String(input?.title || "").toLowerCase();
-      const t = todos.find((x) => x.id === input?.id && canSee(x, viewer)) || (q ? todos.find((x) => !x.done && canSee(x, viewer) && x.title.toLowerCase().includes(q)) : undefined);
+      const t = todos.find((x) => x.id === input?.id && seeable(x)) || (q ? todos.find((x) => !x.done && seeable(x) && x.title.toLowerCase().includes(q)) : undefined);
       if (!t) return "error: no matching open to-do";
       t.done = true;
       await setCollection("todos", todos);
       return `Marked done: ${t.title}`;
+    }
+    case "ask_grandma": {
+      const text = String(input?.message || "").trim();
+      if (!text) return "error: message required";
+      if (!isParent(task.owner) || caregiverHere) return "error: ask_grandma is for a parent's own chat";
+      const shared = threadFor([task.owner, "grandma"]);
+      await postAsKimi(shared, text, `asked Grandma for ${memberName(task.owner)}`);
+      await notify("grandma", text, "group", { thread: shared }).catch((e) => console.error("ask_grandma notify failed", e));
+      return `Asked Grandma in the chat she shares with ${memberName(task.owner)}: "${text}". Her answer will come in that chat (tell ${memberName(task.owner)} to look there).`;
     }
     case "react": {
       const emoji = String(input?.emoji || "");
@@ -774,19 +943,25 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const fact = String(input?.fact || "").trim();
       if (!fact) return "error: fact required";
       if (input?.private === true) {
-        if (!task.privateTo) return "error: private notes can only be saved in a parent's private (Just me) chat.";
-        await addPrivateNote(task.privateTo, `${fact} (${today})`);
-        return `Saved as a private note (only ${task.privateTo === "alex" ? "Alex" : "Sam"} and you can see it): ${fact}`;
+        if (members.length !== 1) return "error: private notes are saved in someone's Just-me chat; everyone in this chat would see it here. Save it as a household fact, or ask them to tell you in their own chat.";
+        await addPrivateNote(members[0], `${fact} (${today})`);
+        return `Saved as a private note (only ${memberName(members[0])} and you can see it): ${fact}`;
       }
       const profile = await getProfile();
-      let sec = profile.sections.find((s) => s.key === "learned");
-      if (!sec) {
-        sec = { key: "learned", title: "Learned facts", body: "" };
-        profile.sections.push(sec);
+      const prior = input?.replaces ? profile.facts.find((f) => f.id === String(input.replaces)) : undefined;
+      if (input?.replaces && !prior) return `error: no fact with id ${input.replaces} — check HOUSEHOLD FACTS for the id, or omit replaces to add a new one`;
+      if (input?.forget === true) {
+        if (!prior) return "error: forget needs replaces (the id of the fact to remove)";
+        profile.facts = profile.facts.filter((f) => f.id !== prior.id);
+        await setProfile(profile);
+        return `Forgot: ${prior.text}`;
       }
-      sec.body = `${sec.body ? sec.body + "\n" : ""}- ${fact} (${today})`;
+      const topic = isFactTopic(input?.topic) ? input.topic : prior?.topic || "other";
+      const about = Array.isArray(input?.about) ? input.about.map((x: unknown) => String(x).toLowerCase()).filter(Boolean) : prior?.about;
+      const next = { id: prior?.id || newFactId(), topic, ...(about?.length ? { about } : {}), text: fact, updatedAt: new Date().toISOString() };
+      profile.facts = prior ? profile.facts.map((f) => (f.id === prior.id ? next : f)) : [...profile.facts, next];
       await setProfile(profile);
-      return `Remembered: ${fact}`;
+      return prior ? `Updated [${next.id}]: ${prior.text} → ${fact}` : `Remembered [${next.id}] (${topicLabel(topic)}): ${fact}`;
     }
     case "schedule_followup": {
       // One-time check-in, stored as its own schedule (so several can be pending at once).
@@ -794,7 +969,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const m = when.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/);
       if (!m) return 'error: when must be "YYYY-MM-DD HH:mm" or "YYYY-MM-DD"';
       try {
-        const sch = await createSchedule({ title: shortTitle(String(input?.note || "Follow-up"), 60), instruction: String(input?.note || ""), owner: task.owner, channel: task.channel, date: m[1], time: m[2] || "08:00", thread: task.id, privateTo: task.privateTo });
+        const sch = await createSchedule({ title: shortTitle(String(input?.note || "Follow-up"), 60), instruction: String(input?.note || ""), owner: task.owner, channel: task.channel, date: m[1], time: m[2] || "08:00", thread: threadId, ...scope });
         return `Scheduled: ${describeSchedule(sch)} — "${sch.title}" (id ${sch.id}).`;
       } catch (e) {
         return `error: ${(e as Error).message}`;
@@ -827,11 +1002,11 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
           date: input?.date,
           time: input?.time,
           repeat,
-          thread: task.id,
-          privateTo: task.privateTo,
+          thread: threadId,
+          ...scope,
         });
         const first = new Date(sch.nextRunAt!).toLocaleString("en-US", { timeZone: HOME_TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-        return `Scheduled "${sch.title}": ${describeSchedule(sch)}. First run ${first} PT. Results go to ${sch.notify === "both" ? "both parents" : task.owner === "alex" ? "Alex" : "Sam"}. (id ${sch.id})`;
+        return `Scheduled "${sch.title}": ${describeSchedule(sch)}. First run ${first} PT. Results go to ${sch.notify === "both" ? "both parents" : memberName(task.owner)}. (id ${sch.id})`;
       } catch (e) {
         return `error: ${(e as Error).message}`;
       }
@@ -861,9 +1036,10 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         summary: String(input?.why || "").trim() || subject,
         payload: { to, cc: cc.length ? cc : undefined, subject, body },
         taskId: task.id,
-        requestedBy: task.owner,
+        requestedBy: isParent(task.owner) ? task.owner : "agent",
         channel: task.channel,
-        privateTo: task.privateTo,
+        ...scope,
+        thread: threadId,
       });
       return `Drafted (${a.id}) — NOT sent. Waiting for ${task.privateTo ? "this parent's" : "a parent's"} approval${
         task.channel !== "app" ? " (reply APPROVE to send, DECLINE to drop)" : " in Chat or on Home"
@@ -873,14 +1049,46 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const title = String(input?.title || "").trim();
       const markdown = String(input?.markdown || "").trim();
       if (!title || !markdown) return "error: title and markdown required";
-      const doc = await createFile({ title, markdown, taskId: task.id, privateTo: task.privateTo });
-      return `File created: "${doc.title}" → ${fileUrl(doc)} (${task.privateTo ? "private to this parent" : "visible to both parents"}; shareable from the Kimi tab → Files)`;
+      const eventId = input?.eventId ? String(input.eventId) : undefined;
+      let doc: FileDoc | null;
+      if (input?.replaces) {
+        const prior = await getFile(String(input.replaces));
+        if (!prior || !seeable(prior)) return `error: no file ${input.replaces} here — check list_files`;
+        doc = await updateFile(prior.id, { title, markdown, eventId });
+      } else doc = await createFile({ title, markdown, taskId: task.id, thread: threadId, eventId, ...scope });
+      if (!doc) return "error: couldn't save the file";
+      // Link it from the event's notes — only when everyone who sees the event may open the file.
+      let linked = "";
+      if (eventId) {
+        const events = await getCollection("events");
+        const ev = events.find((e) => e.id === eventId);
+        if (!ev) linked = ` (no event ${eventId}, so nothing was linked)`;
+        else if (doc.audience || (doc.privateTo && ev.privateTo !== doc.privateTo)) linked = " (not linked from the event: the event is seen by people this file is private from)";
+        else if (!(ev.prep || "").includes(`/f/${doc.id}`)) {
+          ev.prep = `${ev.prep ? ev.prep + "\n" : ""}📄 ${doc.title}: ${fileUrl(doc)}`;
+          await setCollection("events", events);
+          if (ev.gcalId && onSharedCalendar(ev)) await updateCalendarEvent(ev).catch(() => {});
+          linked = ` · linked from "${ev.title}"`;
+        } else linked = ` · linked from "${ev.title}"`;
+      }
+      const v = doc.versions?.length ? ` (version ${doc.versions.length + 1}; earlier ones kept)` : "";
+      return `File ${input?.replaces ? "updated" : "created"} [${doc.id}]: "${doc.title}" → ${fileUrl(doc)}${v}${linked} (${scope.privateTo ? "private to this person" : scope.audience ? "visible to this chat" : "visible to both parents"}; shareable from the Kimi tab → Files)`;
+    }
+    case "list_files": {
+      const q = String(input?.query || "").toLowerCase();
+      const ids = await listFileIds();
+      const docs = (await Promise.all(ids.map((i) => getFile(i))))
+        .filter((d): d is FileDoc => !!d && seeable(d) && (!q || d.title.toLowerCase().includes(q)))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        .slice(0, 15);
+      if (!docs.length) return "No files.";
+      return docs.map((d) => `• [${d.id}] ${d.title} — ${d.updatedAt.slice(0, 10)}${d.versions?.length ? ` · ${d.versions.length + 1} versions` : ""}${d.eventId ? ` · for ${d.eventId}` : ""}`).join("\n");
     }
     case "get_spending": {
       const today = todayPT();
       const from = /^\d{4}-\d{2}-\d{2}$/.test(input?.from || "") ? input.from : `${today.slice(0, 7)}-01`;
       const to = /^\d{4}-\d{2}-\d{2}$/.test(input?.to || "") ? input.to : today;
-      return summarizeSpending(vis(await getCollection("spending")), { from, to, merchant: input?.merchant ? String(input.merchant) : undefined });
+      return summarizeSpending(vis(await getCollection("spending")), { from, to, merchant: input?.merchant ? String(input.merchant) : undefined, category: input?.category ? String(input.category) : undefined });
     }
     case "prepare_payment": {
       const toName = String(input?.to || "").trim();
@@ -946,7 +1154,9 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
           continue;
         }
         try {
-          out.push(`${name}'s work calendar:\n${formatBlocks(await getWorkBlocks(p, from, to))}`);
+          // The caregiver gets availability only — never meeting titles or attendees.
+          const availabilityOnly = caregiverHere;
+          out.push(`${name}'s work calendar${availabilityOnly ? " (availability only)" : ""}:\n${formatBlocks(await getWorkBlocks(p, from, to), { availabilityOnly })}`);
         } catch (e) {
           out.push(`${name}: couldn't read the work calendar (${String((e as Error).message || e).slice(0, 120)}).`);
         }
@@ -979,19 +1189,27 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const id = String(input?.taskId || "").trim();
       const instructions = String(input?.instructions || "").trim();
       const child = id ? await getTask(id) : null;
-      if (!child || child.kind !== "browser" || !canSee(child, viewer)) return `error: no browser task ${id || "(none given)"}`;
+      if (!child || child.kind !== "browser" || !members.every((m) => canSeeTask(child, m))) return `error: no browser task ${id || "(none given)"}`;
       if (!instructions) return "error: instructions required";
-      const who = task.owner === "alex" ? "Alex" : "Sam";
+      const who = memberName(task.owner);
       (child.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[${who} · ${task.channel} · ${nowPT()} PT]\n${instructions}` });
+      // The safety check judges against the parent's request — including how they've refined it since.
+      child.parentRequest = `${parentRequestOf(child)}\n\nLATER (${nowPT()} PT) — PARENT'S OWN WORDS:\n${recentParentWords(task)}\nASSISTANT'S UPDATED BRIEF: ${instructions}`.slice(-4000);
       pushLog(child, { at: new Date().toISOString(), kind: "user", who, text: instructions });
       child.waitingOn = undefined;
+      if (child.takeover) {
+        await redis.del(`takeover:${child.takeover.token}`).catch(() => {});
+        child.takeover = undefined;
+        child.followupNote = undefined;
+      }
       child.status = "running";
       child.nextCheckAt = new Date().toISOString();
       await saveTask(child);
       return `Resumed ${id} with your instructions${child.approvedUntil && Date.parse(child.approvedUntil) > Date.now() ? " (its approval is still valid)" : ""}. It will report back when done.`;
     }
     case "stop_browser_task": {
-      if (!canSee(await getTaskMeta(String(input?.taskId || "")), viewer)) return `error: no browser task ${input?.taskId}`;
+      const target = await getTaskMeta(String(input?.taskId || ""));
+      if (!members.every((m) => canSeeTask(target, m))) return `error: no browser task ${input?.taskId}`;
       const t = await stopTask(String(input?.taskId || ""), task.owner);
       return t ? `Stopped ${t.id} ("${t.title}").` : `error: no browser task ${input?.taskId}`;
     }
@@ -1001,7 +1219,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       if (!goal) return "error: goal required";
       // One job, one task: if a related browser task is still in flight, continue it.
       for (const t of await getTaskMetas(await listActiveTaskIds())) {
-        if (t.kind !== "browser" || (t.status !== "running" && t.status !== "waiting") || !canSee(t, viewer)) continue;
+        if (t.kind !== "browser" || (t.status !== "running" && t.status !== "waiting") || !members.every((m) => canSeeTask(t, m))) continue;
         if (Date.now() - Date.parse(t.updatedAt) > 3 * 3600 * 1000) continue;
         if (titlesSimilar(t.title, goal)) return `error: browser task ${t.id} ("${t.title}") is already in progress for this — use resume_browser_task with that id instead of starting another.`;
       }
@@ -1016,10 +1234,12 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const id = `task-web-${Date.now().toString(36)}`;
       const child = newTask(id, shortTitle(goal, 80), task.owner, task.channel);
       child.kind = "browser";
-      child.privateTo = task.privateTo;
+      child.privateTo = scope.privateTo;
+      child.audience = scope.audience;
       child.parentThread = task.id;
-      child.parentRequest = `${parentWords}\nGOAL: ${goal}${input?.details ? `\nDETAILS: ${String(input.details).trim()}` : ""}`.slice(0, 2000);
-      const who = task.owner === "alex" ? "Alex" : "Sam";
+      // The parent's own words govern; Kimi's brief is her reading of them and can hold guesses.
+      child.parentRequest = `PARENT'S OWN WORDS:\n${parentWords}\n\nASSISTANT'S BRIEF (its reading — may contain guesses; the parent's words win):\nGOAL: ${goal}${input?.details ? `\nDETAILS: ${String(input.details).trim()}` : ""}`.slice(0, 3000);
+      const who = memberName(task.owner);
       (child.thread as Anthropic.MessageParam[]).push({
         role: "user",
         content: `[${who} · ${task.channel} · ${nowPT()} PT]\nGOAL: ${goal}\n${input?.details ? `DETAILS: ${String(input.details).trim()}\n` : ""}Work this in the browser. When finished (or stuck), reply with the outcome for the family.`,
@@ -1053,7 +1273,10 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       if (committing && !approved) {
         return `BLOCKED: [${n}] "${label.slice(0, 60)}" looks like an irreversible step. Call request_approval first, describing exactly what will happen; once a parent approves, retry the click.`;
       }
-      if (committing) {
+      if (committing && task.guardOverride) {
+        // The parent approved this after seeing the safety check's concern: their call.
+        await redis.set(`kimi_purchase:${task.id}`, { host: hostOf(page.url()), at: new Date().toISOString(), what: task.approvedFor || label, privateTo: task.privateTo }, { ex: 3 * 86400 }).catch(() => {});
+      } else if (committing) {
         // Second check: is this click what the parent asked for and approved?
         const text = await web.pageText(page);
         const g = await guardCheck({
@@ -1119,6 +1342,77 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       else await web.typeSecret(page, n, value);
       return `Filled ${field} for "${input?.name}" into [${n}].`;
     }
+    case "search_flights":
+      return searchFlights({
+        from: String(input?.from || ""),
+        to: String(input?.to || ""),
+        date: String(input?.date || ""),
+        returnDate: input?.returnDate ? String(input.returnDate) : undefined,
+        adults: Number(input?.adults) || undefined,
+        children: Number(input?.children) || undefined,
+        cabin: input?.cabin,
+        nonstop: input?.nonstop === true,
+        airlines: Array.isArray(input?.airlines) ? input.airlines.map(String) : undefined,
+        maxPrice: Number(input?.maxPrice) || undefined,
+        next: input?.next ? String(input.next) : undefined,
+      }).catch((e) => `error: ${String(e).slice(0, 200)}`);
+    case "search_hotels":
+      return searchHotels({ where: String(input?.where || ""), checkIn: String(input?.checkIn || ""), checkOut: String(input?.checkOut || ""), adults: Number(input?.adults) || undefined, childAges: Array.isArray(input?.childAges) ? input.childAges.map(Number).filter((n: number) => n >= 0) : undefined, maxPrice: Number(input?.maxPrice) || undefined, sort: input?.sort }).catch((e) => `error: ${String(e).slice(0, 200)}`);
+    case "search_places":
+      return searchPlaces({ query: String(input?.query || ""), near: input?.near ? String(input.near) : undefined }).catch((e) => `error: ${String(e).slice(0, 200)}`);
+    case "get_travelers": {
+      // A caregiver sees only her own card (in any chat she's in).
+      const allowed = caregiverHere ? members.filter((m) => !isParent(m)) : [...TRAVELER_IDS];
+      const want = Array.isArray(input?.who) && input.who.length ? input.who.map((x: unknown) => String(x).toLowerCase()) : allowed;
+      const ts = (await listTravelers("alex")).filter((t) => allowed.includes(t.id) && want.includes(t.id));
+      if (!ts.length) return caregiverHere ? "Only Grandma's own travel card is available here." : "No travel cards match.";
+      return `${travelersText(ts)}\n(Missing details: ask, or point them to Household → Travel in the app.)`;
+    }
+    case "save_traveler_info": {
+      const id = String(input?.person || "").toLowerCase();
+      const allowed = caregiverHere ? members.filter((m) => !isParent(m)) : [...TRAVELER_IDS];
+      if (!allowed.includes(id)) return caregiverHere ? "error: here you can only update Grandma's own travel card" : `error: unknown person "${id}"`;
+      const patch: TravelerPatch = {};
+      for (const k of ["firstName", "middleName", "lastName", "dob", "gender", "seat", "notes"] as const) if (input?.[k]) patch[k] = String(input[k]);
+      if (input?.loyaltyProgram || input?.loyaltyNumber) patch.addLoyalty = { program: String(input?.loyaltyProgram || ""), number: String(input?.loyaltyNumber || "") };
+      const editor: Member = caregiverHere ? (id as Member) : "alex";
+      const t = await saveTraveler(editor, id, patch).catch((e) => e as Error);
+      if (t instanceof Error) return `error: ${t.message}`;
+      return `Saved to ${personName(id)}'s travel card:\n${travelersText([t])}`;
+    }
+    case "request_takeover": {
+      if (task.takeover) return "error: already waiting for a takeover — stop here.";
+      const reason = String(input?.reason || "a check that needs a person").trim().slice(0, 160);
+      const { page } = await ensureBrowser(ctx);
+      const url = page.url();
+      // Whoever asked takes over; a caregiver's job goes to the parents (it may be in their accounts).
+      const to: Member[] = isParent(task.owner) ? [task.owner] : [...PARENTS];
+      const token = randomBytes(18).toString("base64url");
+      task.takeover = { token, reason, url, at: new Date().toISOString(), to };
+      await redis.set(`takeover:${token}`, task.id, { ex: TAKEOVER_TTL_S });
+      task.status = "waiting";
+      task.waitingOn = "takeover";
+      // If nobody takes over, wake once to report rather than wait forever.
+      task.nextCheckAt = new Date(Date.now() + TAKEOVER_TTL_S * 1000).toISOString();
+      task.followupNote = "Nobody took over the browser in time. Look at the page once (browse_read): if the human check is still there, stop and tell the family it needs them to do this step themselves — don't ask for a takeover again.";
+      const link = `${APP_URL}/takeover/${token}`;
+      const msg = `Kimi needs a hand with "${task.title}": ${reason} (${hostOf(url)}). Tap to take over, solve it, then tap Done — I'll pick up right where I was: ${link}`;
+      // Never to a group text: the link opens a browser signed in to the family's accounts (it also needs sign-in).
+      for (const p of to) await notify(p, msg, task.channel === "group" ? "sms" : task.channel, { thread: threadOf(task) }).catch((e) => console.error("takeover notify failed", e));
+      await postToMain(msg, threadOf(task)).catch(() => {});
+      return `WAITING_TAKEOVER: sent ${to.map(memberName).join(" and ")} a link to take over and get past it. Stop here; you'll be woken in the same browser when they're done (or in ${Math.round(TAKEOVER_TTL_S / 60)} minutes if nobody does).`;
+    }
+    case "browse_fill_travel_doc": {
+      const id = String(input?.person || "").toLowerCase();
+      const field = input?.field === "ktn" ? "ktn" : "passport";
+      if (caregiverHere && members.every((m) => m !== id)) return "error: only Grandma's own documents can be used here";
+      if (!TRAVELER_IDS.includes(id)) return `error: unknown person "${id}"`;
+      const value = await travelSecret(id, field).catch(() => null);
+      if (!value) return `error: no ${field === "ktn" ? "Known Traveler Number" : "passport number"} on file for ${id} — ask a parent to add it in the app (Household → Travel)`;
+      const { page } = await ensureBrowser(ctx);
+      await web.typeSecret(page, Number(input?.n), value);
+      return `Filled ${id}'s ${field === "ktn" ? "Known Traveler Number" : "passport number"} into [${input?.n}].`;
+    }
     case "list_cards": {
       if (!opConfigured()) return "No card source is set up (1Password isn't connected). Tell the parent.";
       const cards = await listOpCards();
@@ -1143,7 +1437,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       }
       const { page } = await ensureBrowser(ctx);
       const text = await web.pageText(page);
-      const g = await guardCheck({
+      const g = task.guardOverride ? { ok: true, reason: "" } : await guardCheck({
         action: "fill_card",
         parentRequest: parentRequestOf(task),
         approved: task.approvedFor,
@@ -1157,7 +1451,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       }
       const secret = await getOpCard(card.title);
       if (!secret) return `error: couldn't read ${card.title} from 1Password (missing number?) — stop and tell the parent.`;
-      const home = (await getProfile()).sections.find((x) => x.key === "home")?.body.match(/\b\d{5}\b/)?.[0] || null;
+      const home = factText(await getProfile(), "home", /\b\d{5}\b/).match(/\b\d{5}\b/)?.[0] || null;
       const filled = await web.fillCard(page, { number: secret.number, expMonth: secret.expMonth, expYear: secret.expYear, cvc: secret.cvc, name: secret.name, zip: secret.zip || home });
       if (!filled.length) return `No card fields found on this page. If the payment form is behind a button (e.g. "Add a card", "Credit or debit card"), click it, then call browse_fill_card again.`;
       return `Entered ${card.title} (ending ${card.last4}): ${filled.join(", ")}.${filled.includes("billing ZIP") && !secret.zip ? " (Billing ZIP: the home ZIP.)" : ""} Check the page with browse_read before placing the order.\n\n${await web.readPage(page, 3000)}`;
@@ -1177,6 +1471,8 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const note = task.guardNote ? `⚠️ Kimi's safety check flagged the last attempt: ${task.guardNote}\n\n` : "";
       task.guardNote = undefined;
       const payload: StepPayload = { taskId: task.id, description: note + description, url, screenshot: shot };
+      // Who asked decides who approves: a parent approves their own; a caregiver's goes to both parents.
+      const forCaregiver = !isParent(task.owner);
       const a = await proposeAction({
         kind: "confirm_step",
         title: description.slice(0, 90),
@@ -1185,17 +1481,33 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         taskId: task.id,
         requestedBy: "agent",
         channel: task.channel,
-        privateTo: task.privateTo,
+        // A caregiver's job is decided by a parent: the approval reaches the parents (she sees its status).
+        privateTo: forCaregiver ? undefined : scope.privateTo,
+        audience: forCaregiver ? [...new Set<Member>([...members, ...PARENTS])] : scope.audience,
+        requester: forCaregiver ? task.owner : undefined,
+        thread: threadId,
       });
       task.waitingOn = a.id;
-      task.approvedFor = description.slice(0, 200);
+      task.approvedFor = description.slice(0, 1500);
+      // Approving after seeing the safety check's flag is the parent overruling it for this step.
+      task.guardOverride = !!note;
       task.status = "waiting";
       task.nextCheckAt = undefined;
-      await notify(
-        task.owner,
-        `Needs your approval — ${note}${description}\n\n${task.channel !== "app" ? "Reply APPROVE or DECLINE." : "Open Chat in Family HQ to approve or decline."}`,
-        task.channel
-      ).catch((e) => console.error("approval notify failed", e));
+      if (forCaregiver) {
+        // Ask both parents right away — a text if they're enrolled, else a push — and let her know.
+        const asker = memberName(task.owner);
+        for (const p of PARENTS) {
+          await notify(p, `${asker} asked for this, and it needs your approval — ${note}${description}\n\nReply APPROVE or DECLINE (either of you can).`, "sms").catch((e) => console.error("approval notify failed", e));
+        }
+        await postToMain(`Sent to Alex and Sam to approve: ${description}`, threadId).catch(() => {});
+      } else {
+        await notify(
+          task.owner,
+          `Needs your approval — ${note}${description}\n\n${task.channel !== "app" ? "Reply APPROVE or DECLINE." : "Open Chat in Family HQ to approve or decline."}`,
+          task.channel,
+          { thread: threadId }
+        ).catch((e) => console.error("approval notify failed", e));
+      }
       return `WAITING_APPROVAL ${a.id}: paused until a parent decides. Stop here. (The browser is closed while you wait — you'll still be signed in when resumed, but navigate back to where you were before continuing.)`;
     }
     default:
@@ -1210,9 +1522,12 @@ BROWSER TASK MODE — you are working a background job in a real web browser on 
 - Work step by step: browse_goto → browse_read → act → browse_read. Read the page after every action; never assume it worked. Prefer browse_read; use browse_screenshot only when layout matters or text is ambiguous.
 - Logins: list_credentials, then browse_fill_credential for BOTH username and password (and field='otp' if the site asks for an authenticator code and the login has one). Never ask for, type, or guess a password.
 - Approval: ask ONCE per job, right before the first click that commits money, a booking, a registration, a cancellation, or a message. Get everything in order first (cart, address, shipping, payment method, review page), then call request_approval describing the COMPLETE outcome — item(s), total price, ship-to, payment method, date/time — so the parent can say yes once. Getting to the checkout/review page needs no approval. Once approved, finish the job without asking again (the approval covers the whole job, for hours); if you truly must deviate from what was approved (different total, different item), ask again with the difference.
+- Reorders ("my usual X"): the site's order history is the truth, not the brief. If it shows an item the parent clearly buys repeatedly that fits their words, that IS their usual — add it and go to the approval, noting any difference from the brief ("your history shows the 2-pack, not the single"), instead of stopping to ask. Stop to ask only when several different items plausibly fit.
 - Paying: prefer a card already saved on the site. If the site needs a card entered, call list_cards and pick the card the parent named — otherwise a personal card, NEVER a company card unless the parent named it. Name it in request_approval ("pay with Family Visa ending 4242"), and after approval call browse_fill_card. Never type card numbers yourself.
 - A separate safety check reviews payment clicks and card entry against what the parent asked for. If it blocks a step, don't look for another way around it — ask again describing exactly that step, or stop and report.
-- CAPTCHA, 2FA, a tool returning an error twice, or stuck after 3 attempts at the same thing → stop and report what you found and what's needed. Never retry the same failing call in a loop.
+- Travel bookings: legal names, dates of birth, and loyalty numbers come from get_travelers; passport and Known Traveler numbers go in with browse_fill_travel_doc (never ask for them or type them). Flag a passport that expires within 6 months of an international trip before booking.
+- A CAPTCHA or any "are you human" check (I'm not a robot, press and hold, puzzles) → request_takeover once, then stop; never try to solve or get around it yourself. When woken after a takeover, browse_read first — you're in the same browser.
+- A 2FA code the saved login can't provide, a tool returning an error twice, or stuck after 3 attempts at the same thing → stop and report what you found and what's needed. Never retry the same failing call in a loop.
 - Stay on task; don't browse beyond what the goal needs. Don't accept unrelated offers or add-ons.
 - When done: reply with a concise outcome — what was done, confirmation numbers, anything still pending. Put long details in a File (create_file).`;
 
@@ -1220,9 +1535,26 @@ BROWSER TASK MODE — you are working a background job in a real web browser on 
 async function threadContext(task: Task): Promise<string> {
   if (task.kind === "browser") return "";
   const p = task.privateTo;
+  if (!p && task.id.startsWith("task-with-")) {
+    const ms = threadMembers(task.id);
+    const names = ms.map(memberName).join(", ").replace(/, ([^,]*)$/, " and $1");
+    return `THIS CONVERSATION: a shared chat with ${names} — everyone here sees everything in it. Messages tagged "group" came from its group text (once everyone in it has opted in to texts), and your reply to one goes to every phone in it.
+- Everyone here talks to you: answer, react, or both, address the person who wrote, keep it short, and when more than one person needs to act, say who does what.
+- Each person also has a private chat with you, and Alex and Sam have their own family chat; never bring those up here, and use only what everyone here may see.
+- Grandma is here, so the caregiver limits apply: no spending, saved logins or cards, or emails drafted in a parent's name; work calendars are availability only ("Sam's busy until 4"), never meeting names. Anything that costs money: if Grandma asks, you prepare it and Alex and Sam approve it (they get a message right away); if a parent asks, they approve it as usual.
+- File things on the family calendar and to-dos as usual. private: true keeps an item within this chat's members (say, a surprise for someone who isn't in it).`;
+  }
   if (!p) {
-    return `THIS CONVERSATION: the FAMILY chat — Alex and Sam both see everything here. Each parent also has a private "Just me" chat with you; you never reveal or hint at anything from those here (you can't see their private items in this chat anyway). Private items can only be made in a Just me chat.
+    return `THIS CONVERSATION: the FAMILY chat — Alex and Sam both see everything here. Grandma can't: she has her own private chat with you, plus shared chats with each of them and with all three — never reveal or hint at anything from those here. Each parent also has a private "Just me" chat with you; you never reveal or hint at anything from those here either (you can't see their private items in this chat anyway). private: true here keeps an item between Alex and Sam (off Grandma's calendar and lists).
 It is also the family GROUP TEXT (Alex, Sam, and you on their phones): messages tagged "group" came from it, and your reply to one goes to both phones. The parents talk privately in their own thread, so everything in the group is for you: answer, react, or both, as you would one-on-one — and never send a reply that says nothing (react instead). Answer the person who wrote, keep it text-message short, and when both need to act, say who does what.`;
+  }
+  if (!isParent(p)) {
+    const notes = await getPrivateNotes(p);
+    return `THIS CONVERSATION: GRANDMA'S private chat — Grandma and you. She's ${CONFIG.caregivers.grandma.name}, Sam's mom; she lives with the family and helps with the kids (pickups, no-school days, covering when Alex and Sam are busy). Everyone calls her Grandma, and so do you. Alex and Sam can't see this chat; it's also where her one-on-one texts with you land.
+- She can see and ask about the family calendar and to-dos, the kids, household facts, and school and activity email (search the parents' inboxes for her when it helps). File what she tells you on the family calendar and to-dos as usual (private: true keeps something between you two).
+- Some things stay with the parents: their own chats, spending and receipts, saved logins and cards, and their work-calendar details. For work, share availability only ("Sam's busy until 4", "Alex is out Tuesday afternoon"), never meeting names or who's in them.
+- Anything that costs money or commits the family (an order, a booking, a payment): she can ask, you prepare it as a browser task, and Alex or Sam approve it — they get a message right away. Tell her it's with them and that you'll let her know; she never approves it herself.
+- Be warm and simple with her, and keep texts short.${notes.length ? `\nGRANDMA'S PRIVATE NOTES:\n${notes.map((n) => `- ${n}`).join("\n")}` : ""}`;
   }
   const name = p === "alex" ? "Alex" : "Sam";
   const other = p === "alex" ? "Sam" : "Alex";
@@ -1235,17 +1567,9 @@ It is also the family GROUP TEXT (Alex, Sam, and you on their phones): messages 
 - Never bring up this conversation in the family chat.${notes.length ? `\n${name.toUpperCase()}'S PRIVATE NOTES:\n${notes.map((n) => `- ${n}`).join("\n")}` : ""}`;
 }
 
-export async function systemPrompt(task: Task): Promise<string> {
-  const [kids, profile, thread] = await Promise.all([getCollection("kids"), getProfile(), threadContext(task)]);
-  const roster = kids
-    .map((k) => `- ${k.firstName} (id "${k.id}", born ${k.dob}): ${k.current.program} @ ${k.current.school}, teacher(s) ${k.current.teachers.join(", ")}${k.current.aftercare ? `; after school: ${k.current.aftercare}` : ""}`)
-    .join("\n");
-  return `You are Kimi, the family's assistant, working for Alex (dad, ${CONFIG.parents.alex.email}) and Sam (mom, ${CONFIG.parents.sam.email}), and their kids:
-${roster}
-
-${profileContext(profile)}
-${thread ? `\n${thread}\n` : ""}
-WHO YOU ARE
+// Kimi's voice and how she works in chat. Browser tasks don't get it: they work a page and write
+// one short report, and this text (with its examples) would ride along on every browsing step.
+const CHAT_GUIDE = `WHO YOU ARE
 You're Kimi, the household's sunny, sharp-as-a-tack sidekick: the friend who's genuinely delighted to help, never forgets a birthday, and makes family logistics feel lighter.
 
 YOUR VOICE — this is what makes you Kimi and not a generic assistant. Stay in it every reply, however long the conversation has been.
@@ -1281,6 +1605,7 @@ Sam: Ava has a fever. Do we need to cancel anything tomorrow?
 Kimi: [❤️] Oh no, poor Ava. Nothing to cancel tomorrow — just daycare. I can draft a quick note to Sunny Days so they know she's staying home. Want me to?
 
 HOW YOU WORK
+- Language: answer in the language each person writes in, matching their mix (including any English mixed in the way they mix it). Never switch a non-English message to an all-English reply. Names, times, addresses, and phone numbers stay as they are.
 - Be brief and concrete: after a quick warm opener, get straight to the answer. Two to four sentences is usually right; a short list only for three or more separate items.
 - Never answer a calendar, to-do, or directory question from memory — call get_upcoming, search, or directory first. Quote dates and times as they come back (they're Pacific).
 - When a parent tells you about a dated plan or asks to add/track something, file it (add_event / add_todo) and confirm in one line what you filed. Don't ask permission for obvious filings; do ask when the date, time, or who-it's-for is genuinely ambiguous.
@@ -1293,21 +1618,44 @@ HOW YOU WORK
 - Money: get_spending answers "what did we spend / did that payment go through" from receipts (say it's from receipts, not a bank statement). To pay a person (babysitter, class fund), use prepare_payment — it gives the parent a Venmo link to confirm; you never send money yourself. Purchases on websites go through a browser task and one approval that names the card; never pick a company card unless the parent says so.
 - Weather and travel: for outdoor plans, check get_weather and mention rain or heat when it matters. Event listings include "~N min drive, leave by …" for places a real drive from home — use it when timing matters (who can get there, when to leave).
 - VERIFY BEFORE ASSERTING. When you're unsure whether something is done or still needed — an RSVP, a sign-up, a payment, a registration — or of a detail like a time or place, check before you answer: search_email on BOTH parents' inboxes (one of them often replied from their phone), read_link on the invitation or sign-up link in the event's notes or the email, and a browser task if it's behind a login. Never tell a parent something is open or unknown without having looked. Say what you found and where.
+- Travel: compare flights with search_flights, hotels with search_hotels, and look up local businesses with search_places — seconds, not a browser task. If the household facts name a preferred airline, search it first and book on its own site in a browser task signed in to the family's saved login, adding every traveler's loyalty number, legal name, and date of birth from get_travelers (and Known Traveler / passport numbers with browse_fill_travel_doc). Put a multi-option comparison in a File. When someone mentions a loyalty number or seat preference, save it with save_traveler_info.
 - Research: use web_search / web_fetch for the outside world (camps, classes, vendors, hours, prices) and search_email for what's in the inboxes (school inbox, or a parent's own Gmail if connected — pick the account by whose mail it would be). Say briefly where facts came from.
 - Anything that needs a real browser (register, book, buy, cancel, fill a site's form, check an account) → start_browser_task with a complete, self-contained goal and details. It pauses ONCE for the parents' approval before committing. You cannot make phone calls.
 - While a browser task is in progress, anything the parent sends for it — a verification code, an answer, "go ahead", a change — goes to resume_browser_task with that task's id. Never start a second task for the same job. "Stop / cancel / forget it" → stop_browser_task.
 - Messages arrive tagged with who sent them ([Alex …] or [Sam …]); address the person who wrote.
 - Reactions: parents can react to your messages (a 👍 on your offer arrives as a yes — go ahead with what you offered). Your own reactions (see YOUR VOICE) show on their message in the app and as real tapbacks in texts. In the group text especially, never send a reply that says nothing — react instead.
 - Formatting: write in sentences, like a text message. In the app, bold at most the one fact that matters most, and skip headers; use a list only for three or more items or steps. SMS and the group text: plain text, no markdown, under ~300 characters unless listing items. Longer structured output (comparisons, plans) goes in a File.
-- Everything is in Pacific time.
+- Everything is in Pacific time.`;
 
-${PREP_CONVENTIONS}
+const BROWSER_BRIEF = `You're Kimi, working a background job in a real browser for the family. Your final report goes to them in chat: write it as Kimi — warm, brief, concrete (what was done, confirmation numbers, what's pending), in the language they asked in. Everything is in Pacific time.`;
 
-${NAME_COLLISIONS}${task.kind === "browser" ? "\n" + BROWSER_MODE : ""}`;
+export async function systemPrompt(task: Task): Promise<string> {
+  const [kids, profile, thread] = await Promise.all([getCollection("kids"), getProfile(), threadContext(task)]);
+  const roster = kids
+    .map((k) => `- ${k.firstName} (id "${k.id}", born ${k.dob}): ${k.current.program} @ ${k.current.school}, teacher(s) ${k.current.teachers.join(", ")}${k.current.aftercare ? `; after school: ${k.current.aftercare}` : ""}`)
+    .join("\n");
+  return `You are Kimi, the family's assistant, working for Alex (dad, ${CONFIG.parents.alex.email}) and Sam (mom, ${CONFIG.parents.sam.email}), and their kids:
+${roster}
+Grandma (${CONFIG.caregivers.grandma.name}, Sam's mom) lives with the family, helps with the kids, and talks with you too, in her own private chat.
+
+${profileContext(profile, { withIds: true })}
+${thread ? `\n${thread}\n` : ""}
+${task.kind === "browser" ? `${BROWSER_BRIEF}\n\n${NAME_COLLISIONS}\n${BROWSER_MODE}` : `${CHAT_GUIDE}\n\n${PREP_CONVENTIONS}\n\n${NAME_COLLISIONS}`}`;
 }
 
+// Not in the caregiver's chat: money and the parents' voice (spending, Venmo, email drafts in a
+// parent's name, the cards list). Her purchases go through a browser task a parent approves.
+const CAREGIVER_HIDDEN = new Set(["get_spending", "prepare_payment", "draft_email", "list_cards"]);
+
+// Chat tools a browser job never needs; leaving them out keeps every browsing step's prompt smaller.
+const BROWSER_SKIP = new Set(["delete_events", "complete_todo", "schedule_task", "list_schedules", "cancel_schedule", "schedule_followup", "draft_email", "get_spending", "prepare_payment", "get_weather", "get_work_calendar", "list_files"]);
+
 export function toolsFor(task: Task): Anthropic.Messages.ToolUnion[] {
-  return task.kind === "browser" ? [...BASE_TOOLS, ...BROWSER_TOOLS] : [...BASE_TOOLS, ...CHAT_ONLY_TOOLS];
+  if (task.kind === "browser") return [...BASE_TOOLS.filter((t) => !("name" in t) || !BROWSER_SKIP.has(t.name)), ...BROWSER_TOOLS];
+  const all = [...BASE_TOOLS, ...CHAT_ONLY_TOOLS];
+  // With the caregiver in the chat, her limits apply; ask_grandma is for the parents' own chats.
+  const caregiverHere = membersOf(task).some((m) => !isParent(m));
+  return all.filter((t) => !("name" in t) || (caregiverHere ? !CAREGIVER_HIDDEN.has(t.name) && t.name !== "ask_grandma" : true));
 }
 
 // ── Thread helpers ───────────────────────────────────────────────────────────
@@ -1315,7 +1663,17 @@ export function toolsFor(task: Task): Anthropic.Messages.ToolUnion[] {
 // Trim in chunks, not a sliding window: once the thread passes MAX_THREAD, cut back to
 // about KEEP_THREAD. The start then stays put for many turns, so the cached prefix keeps
 // matching (a window that slides every message invalidates the whole cache each time).
+const APP_URL = process.env.APP_URL || "https://your-app.vercel.app";
+/** How long a takeover link works (and when the task wakes to report if nobody used it). */
+export const TAKEOVER_TTL_S = 30 * 60;
+
 const MAX_THREAD = 80;
+// Cache for an hour, not five minutes: family messages are often more than five minutes apart,
+// and a cold cache re-bills the whole prefix (instructions, tools, history) at full price.
+// The end of the thread changes every step (seconds apart in a tool loop), so it's cached for 5
+// minutes — an hour-long write costs 2× input against 1.25×. Order matters: 1h marks must come first.
+const CACHE = { type: "ephemeral", ttl: "1h" } as const;
+const CACHE_STEP = { type: "ephemeral", ttl: "5m" } as const;
 const KEEP_THREAD = 40;
 // Tool results from finished turns are cut to this many characters.
 const COMPACT_AT = 700;
@@ -1336,7 +1694,38 @@ export function trimThread(msgs: Anthropic.MessageParam[]): Anthropic.MessagePar
     // A long browser job may have no plain user message in range — never cut it to nothing.
     if (start < out.length) out = out.slice(start);
   }
-  return compactFinishedTurns(dropOldImages(out));
+  return compactFinishedTurns(compactOldPages(dropOldImages(out)));
+}
+
+// A browser job is one long turn: every page it has looked at would ride along on every later
+// step (13 page loads ≈ 140K characters by the end of one task). Keep the last few page views
+// whole and shrink older ones to their URL and title; drop reasoning from those older steps too.
+// Done in chunks so the start of the thread stays byte-identical (cached) for several steps.
+const PAGE_MARK = "\nINTERACTIVE ELEMENTS (reference by [n]):\n";
+const PAGES_KEEP = 3;
+const PAGES_CHUNK = 5;
+function compactOldPages(msgs: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
+  const pageAt: number[] = [];
+  msgs.forEach((m, i) => {
+    if (m.role === "user" && typeof m.content !== "string" && m.content.some((b) => b.type === "tool_result" && typeof b.content === "string" && b.content.includes(PAGE_MARK))) pageAt.push(i);
+  });
+  const cut = Math.floor(Math.max(0, pageAt.length - PAGES_KEEP) / PAGES_CHUNK) * PAGES_CHUNK;
+  if (!cut) return msgs;
+  const boundary = pageAt[cut - 1]; // compact everything up to and including this message
+  return msgs.map((m, i) => {
+    if (i > boundary || typeof m.content === "string") return m;
+    if (m.role === "assistant") {
+      const kept = m.content.filter((b) => b.type !== "thinking" && b.type !== "redacted_thinking");
+      return kept.length === m.content.length ? m : { ...m, content: kept.length ? kept : [{ type: "text" as const, text: "(…)" }] };
+    }
+    let changed = false;
+    const content = m.content.map((b) => {
+      if (b.type !== "tool_result" || typeof b.content !== "string" || !b.content.includes(PAGE_MARK)) return b;
+      changed = true;
+      return { ...b, content: `${b.content.slice(0, b.content.indexOf(PAGE_MARK)).trim()}\n[older page view trimmed — browse_read to look again]` };
+    });
+    return changed ? { ...m, content } : m;
+  });
 }
 
 function lastPlainUserIndex(msgs: Anthropic.MessageParam[], before = msgs.length): number {
@@ -1357,9 +1746,28 @@ function compactFinishedTurns(msgs: Anthropic.MessageParam[]): Anthropic.Message
   return msgs.map((m, i) => {
     if (i >= boundary || typeof m.content === "string") return m;
     if (m.role === "assistant") {
-      const kept = m.content.filter((b) => b.type !== "thinking" && b.type !== "redacted_thinking");
-      if (kept.length === m.content.length) return m;
-      return { ...m, content: kept.length ? kept : [{ type: "text" as const, text: "(…)" }] };
+      // Keep what was said and the tool calls (their results follow); drop reasoning and server-side
+      // tool output (web search pages, code execution) — those were ~70% of the family chat's context.
+      let changed = false;
+      const kept = m.content.flatMap((b): Anthropic.ContentBlockParam[] => {
+        if (b.type === "tool_use") return [b];
+        if (b.type === "text") {
+          if (!("citations" in b) || !b.citations) return [b];
+          changed = true;
+          return [{ type: "text", text: b.text }];
+        }
+        changed = true;
+        return [];
+      });
+      if (!changed) return m;
+      // Search-heavy answers arrive as many small text blocks between citations; join them.
+      const merged: Anthropic.ContentBlockParam[] = [];
+      for (const b of kept) {
+        const last = merged[merged.length - 1];
+        if (b.type === "text" && last?.type === "text") merged[merged.length - 1] = { type: "text", text: last.text + b.text };
+        else merged.push(b);
+      }
+      return { ...m, content: merged.length ? merged : [{ type: "text" as const, text: "(…)" }] };
     }
     let changed = false;
     const content = m.content.map((b) => {
@@ -1380,21 +1788,24 @@ function compactFinishedTurns(msgs: Anthropic.MessageParam[]): Anthropic.Message
  */
 export function withCacheBreakpoint(msgs: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
   if (!msgs.length) return msgs;
-  const mark = (m: Anthropic.MessageParam): Anthropic.MessageParam => {
+  const mark = (m: Anthropic.MessageParam, cache: { type: "ephemeral"; ttl?: "5m" | "1h" } = CACHE_STEP): Anthropic.MessageParam => {
     const blocks: Anthropic.ContentBlockParam[] = typeof m.content === "string" ? [{ type: "text", text: m.content }] : [...m.content];
     if (!blocks.length) return m;
     const i = blocks.length - 1;
-    blocks[i] = { ...blocks[i], cache_control: { type: "ephemeral" } } as Anthropic.ContentBlockParam;
+    blocks[i] = { ...blocks[i], cache_control: cache } as Anthropic.ContentBlockParam;
     return { ...m, content: blocks };
   };
   const out = [...msgs];
-  out[out.length - 1] = mark(out[out.length - 1]);
+  // A turn's opening message is the next turn's "previous" mark, read up to an hour later: cache it
+  // for an hour. Later steps in the turn (tool results) only need minutes.
+  const last = out[out.length - 1];
+  out[out.length - 1] = mark(last, isPlainUser(last) ? CACHE : CACHE_STEP);
   // Also mark the previous turn's opening message. The first call of that turn cached
   // everything up to it, and compacting that turn afterwards doesn't touch anything
   // before it — so a new message re-reads the older history from cache.
   const cur = lastPlainUserIndex(out);
   const prev = cur > 0 ? lastPlainUserIndex(out, cur) : -1;
-  if (prev >= 0 && prev < out.length - 1) out[prev] = mark(out[prev]);
+  if (prev >= 0 && prev < out.length - 1) out[prev] = mark(out[prev], CACHE);
   return out;
 }
 
@@ -1436,11 +1847,11 @@ async function reactToLatest(task: Task, emoji: string): Promise<boolean> {
   if (!target) return false;
   await setReaction(task.id, target, "kimi", emoji);
   // Texts: send the same tapback a phone would, so it shows on their bubble (one-on-one or in the group).
-  const who = target.who === "Alex" ? "alex" : target.who === "Sam" ? "sam" : null;
+  const who = (["alex", "sam", "grandma"] as const).find((m) => memberName(m) === target.who) ?? null;
   if (task.channel === "sms" && who && (await getSmsOptIn(who)) === "enrolled") {
     await sendReactionSms(phoneFor(who), emoji, target.text).catch((e) => console.error("reaction text failed", e));
   } else if (task.channel === "group") {
-    await sendGroupReaction(emoji, target.text).catch((e) => console.error("group reaction failed", e));
+    await sendGroupReaction(threadOf(task), emoji, target.text).catch((e) => console.error("group reaction failed", e));
   }
   return true;
 }
@@ -1450,15 +1861,16 @@ function pushLog(task: Task, entry: TaskLogEntry) {
   if (task.log.length > 200) task.log = task.log.slice(-200);
 }
 
-export function newTask(id: string, title: string, owner: "alex" | "sam", channel: Channel): Task {
+export function newTask(id: string, title: string, owner: Member, channel: Channel): Task {
   const now = new Date().toISOString();
   const priv = threadOwner(id);
-  return { id, title: priv ? `Just me (${priv === "alex" ? "Alex" : "Sam"})` : title, status: "open", kind: "chat", channel, owner, createdAt: now, updatedAt: now, thread: [], log: [], ...(priv ? { privateTo: priv } : {}) };
+  const shared = !priv && id.startsWith("task-with-") ? threadMembers(id).map(memberName).join(" & ") : "";
+  return { id, title: priv ? `Just me (${memberName(priv)})` : shared ? `Chat: ${shared}` : title, status: "open", kind: "chat", channel, owner, createdAt: now, updatedAt: now, thread: [], log: [], ...(priv ? { privateTo: priv } : {}) };
 }
 
 /** Append a parent's message to the task thread (tagged with speaker/channel/time). */
-export function addUserMessage(task: Task, who: "alex" | "sam", channel: Channel, text: string, opts: { log?: boolean } = {}) {
-  const name = who === "alex" ? "Alex" : "Sam";
+export function addUserMessage(task: Task, who: Member, channel: Channel, text: string, opts: { log?: boolean } = {}) {
+  const name = memberName(who);
   (task.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[${name} · ${channel} · ${nowPT()} PT]\n${text}` });
   // A reaction that Kimi should act on is shown on the message it reacts to, not as a new bubble.
   if (opts.log !== false) pushLog(task, { at: new Date().toISOString(), kind: "user", who: name, text });
@@ -1490,11 +1902,14 @@ export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: 8000,
-        system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+        system: [{ type: "text", text: system, cache_control: CACHE }],
         tools,
-        output_config: { effort: "medium" },
+        // Browser steps are mostly "read the page, click the next thing": low effort keeps the
+        // reasoning (billed as output) short. Chat keeps medium.
+        output_config: { effort: task.kind === "browser" ? "low" : "medium" },
         messages: withCacheBreakpoint(messages),
       });
+      recordUsage(task.kind === "browser" ? "browser" : "chat", MODEL, response.usage);
 
       // A turn that was only a reaction can end with no text; the API needs a non-empty message.
       messages.push({ role: "assistant", content: response.content.length ? response.content : [{ type: "text", text: "[reacted — no reply needed]" }] });
@@ -1526,7 +1941,7 @@ export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?
           out = `error: ${String(e).slice(0, 300)}`;
           isError = true;
         }
-        if (typeof out === "string" && out.startsWith("WAITING_APPROVAL")) waiting = true;
+        if (typeof out === "string" && /^WAITING_(APPROVAL|TAKEOVER)/.test(out)) waiting = true;
         results.push({ type: "tool_result", tool_use_id: tu.id, content: out, is_error: isError || undefined });
         const line = typeof out === "string" ? out.split("\n")[0].slice(0, 160) : "(screenshot)";
         pushLog(task, { at: new Date().toISOString(), kind: "tool", text: `${tu.name}: ${line}` });
@@ -1581,13 +1996,13 @@ export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?
 }
 
 /** Handle one inbound message on a task under its lock; returns the reply ("" if deferred). */
-export async function converse(taskId: string, who: "alex" | "sam", channel: Channel, text: string, deadlineMs: number, opts: { log?: boolean } = {}): Promise<{ reply: string; task: Task }> {
+export async function converse(taskId: string, who: Member, channel: Channel, text: string, deadlineMs: number, opts: { log?: boolean } = {}): Promise<{ reply: string; task: Task }> {
   const got = await acquireTaskLock(taskId, 240);
   if (!got) throw new Error("busy");
   try {
     const task = (await getTask(taskId)) || newTask(taskId, "Family chat", who, channel);
     const owner = threadOwner(taskId);
-    if (owner && owner !== who) throw new Error("not your thread");
+    if (!threadMembers(taskId).includes(who)) throw new Error("not your thread");
     if (owner) task.privateTo = owner;
     addUserMessage(task, who, channel, text, opts);
     await saveTask(task);
@@ -1602,7 +2017,7 @@ export async function converse(taskId: string, who: "alex" | "sam", channel: Cha
  * Record a user message and a ready-made reply on a task without running the
  * model — used when something else (the file-this pipeline) already did the work.
  */
-export async function appendExchange(taskId: string, who: "alex" | "sam", channel: Channel, userText: string, assistantText: string): Promise<Task> {
+export async function appendExchange(taskId: string, who: Member, channel: Channel, userText: string, assistantText: string): Promise<Task> {
   if (!(await acquireTaskLock(taskId, 60))) throw new Error("busy");
   try {
     const task = (await getTask(taskId)) || newTask(taskId, "Family chat", who, channel);
@@ -1646,10 +2061,11 @@ export async function runDueSchedules(deadlineMs: number, opts: { taskId?: strin
         if (owner) task.privateTo = owner;
         task.owner = s.owner;
         task.channel = s.channel;
-        const asker = s.owner === "alex" ? "Alex" : "Sam";
-        // A private schedule only ever reports to its owner.
+        const asker = memberName(s.owner);
+        // A private schedule only ever reports to its owner; "both" means everyone in its chat.
         const both = s.notify === "both" && !s.privateTo;
-        const audience = both ? "Alex and Sam" : asker;
+        const everyone = threadMembers(threadId);
+        const audience = both ? everyone.map(memberName).join(" and ") : asker;
         (task.thread as Anthropic.MessageParam[]).push({
           role: "user",
           content: `[system · scheduled task · ${nowPT()} PT]\n"${s.title}" — ${describeSchedule(s)}; set up by ${asker}.\nDo this now: ${s.instruction}\nLook things up as needed (never from memory), then write the message ${audience} should receive.`,
@@ -1659,8 +2075,8 @@ export async function runDueSchedules(deadlineMs: number, opts: { taskId?: strin
         await saveTask(task);
         const reply = await runAgent(task, { deadlineMs });
         if (reply && opts.send !== false) {
-          const to: ("alex" | "sam")[] = both ? ["alex", "sam"] : [s.privateTo || s.owner];
-          await deliver(to, reply, s.channel).catch((e) => console.error("schedule notify failed", e));
+          const to: Member[] = both ? everyone : [s.privateTo || s.owner];
+          await deliver(to, reply, s.channel, threadId).catch((e) => console.error("schedule notify failed", e));
         }
         ran++;
       } finally {
@@ -1707,9 +2123,27 @@ export async function stopTask(taskId: string, by: string, reason = "stopped by 
     console.error("stopTask: action cleanup failed", e);
   }
   const msg = `Background task "${task.title}" was stopped (${reason}).`;
-  if (by === "system") await notify(task.owner, msg, task.channel).catch(() => {});
+  if (by === "system") await notify(task.owner, msg, task.channel, { thread: threadOf(task) }).catch(() => {});
   await postToMain(msg, task.parentThread || MAIN_TASK_ID).catch(() => {});
   return task;
+}
+
+/** Kimi says something in a chat on her own (e.g. asking Grandma for a parent): shown as her message. */
+async function postAsKimi(threadId: string, text: string, why: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while (!(await acquireTaskLock(threadId, 30))) {
+    if (Date.now() > deadline) throw new Error("busy");
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  try {
+    const t = (await getTask(threadId)) || newTask(threadId, "Chat", "grandma", "app");
+    (t.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[system · you ${why} · ${nowPT()} PT]\nYou wrote to this chat: ${text}` });
+    pushLog(t, { at: new Date().toISOString(), kind: "assistant", text });
+    t.lastReply = text;
+    await saveTask(t);
+  } finally {
+    await releaseTaskLock(threadId);
+  }
 }
 
 /** Let the family chat know a background task finished (best-effort, non-blocking). */
@@ -1772,7 +2206,7 @@ export async function runDueTasks(budgetMs: number): Promise<number> {
       await saveTask(task);
       const reply = await runAgent(task, { deadlineMs: started + budgetMs });
       if (reply) {
-        await notify(task.owner, reply, task.channel).catch((e) => console.error("notify failed", e));
+        await notify(task.owner, reply, task.channel, { thread: threadOf(task) }).catch((e) => console.error("notify failed", e));
         if (task.kind === "browser") {
           await web.releaseSession(task.browserSessionId);
           task.browserSessionId = undefined;
