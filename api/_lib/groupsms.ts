@@ -1,6 +1,7 @@
+import { localSkip } from "./sandbox.js";
 import { redis } from "./db.js";
 import { twilioAuth, readMedia, MEDIA_OK, type FetchedMedia } from "./twilio.js";
-import { smsBody, sendSms, getSmsOptIn, phoneFor, smsConfigured, tapbackText, textable } from "./notify.js";
+import { smsBody, smsChunks, sendSms, getSmsOptIn, phoneFor, smsConfigured, tapbackText, textable } from "./notify.js";
 import { memberName } from "./privacy.js";
 import { MEMBERS, MAIN_THREAD, threadsFor, threadMembers } from "../../src/data/threads.js";
 import type { Member } from "../../src/data/types";
@@ -95,6 +96,7 @@ export async function ensureGroups(): Promise<string[]> {
 }
 
 async function createGroup(thread: string, ms: Member[]): Promise<boolean> {
+  if (localSkip(`creating the ${thread} group text`)) return false;
   if (!(await redis.set(`${KEY}_lock:${thread}`, "1", { nx: true, ex: 60 }))) return false;
   let sid = "";
   try {
@@ -140,10 +142,10 @@ async function createGroup(thread: string, ms: Member[]): Promise<boolean> {
 
 /** Kimi says something in a chat's group text (branded, plain text, HQ links only — like every text). */
 export async function sendGroup(thread: string, raw: string): Promise<boolean> {
+  if (localSkip(`group text to ${thread}`)) return true; // "sent", so callers don't fall back to 1:1 texts
   const g = await getGroup(thread);
   if (!g) return false;
-  const body = smsBody(raw).slice(0, 1500);
-  await tw(`/Conversations/${g.sid}/Messages`, { Author: KIMI_IDENTITY, Body: body });
+  for (const body of smsChunks(smsBody(raw))) await tw(`/Conversations/${g.sid}/Messages`, { Author: KIMI_IDENTITY, Body: body });
   return true;
 }
 
@@ -152,6 +154,7 @@ export async function sendGroup(thread: string, raw: string): Promise<boolean> {
  * curly quotes, so iPhones show it as a tapback on that bubble (tested on iOS).
  */
 export async function sendGroupReaction(thread: string, emoji: string, quoted: string): Promise<boolean> {
+  if (localSkip(`group tapback in ${thread}`)) return true;
   const g = await getGroup(thread);
   const body = tapbackText(emoji, quoted);
   if (!g || !body) return false;
@@ -161,6 +164,7 @@ export async function sendGroupReaction(thread: string, emoji: string, quoted: s
 
 /** Tear a group down (someone in it opted out — Kimi can't text them anymore). */
 export async function closeGroup(thread: string): Promise<void> {
+  if (localSkip(`closing the ${thread} group text`)) return;
   const g = await getGroup(thread);
   if (!g) return;
   await redis.hdel(KEY, thread);

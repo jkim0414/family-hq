@@ -12,7 +12,7 @@ const { default: Anthropic } = await import("@anthropic-ai/sdk");
 const { getTask } = await import("../api/_lib/db");
 const { systemPrompt, toolsFor, trimThread } = await import("../api/_lib/agent");
 const client = new Anthropic();
-const MODEL = process.env.AGENT_MODEL || "claude-opus-5";
+const MODEL = process.env.AGENT_MODEL || "claude-opus-5-5";
 const task: any = await getTask("task-main");
 const full = await systemPrompt(task);
 const start = full.indexOf("WHO YOU ARE"), end = full.indexOf("HOW YOU WORK");

@@ -95,3 +95,42 @@ export async function eventWeatherNote(e: Pick<CalEvent, "title" | "location" | 
   if (w.minF <= 45) return `🧥 ${w.minF}°F`;
   return null;
 }
+
+// ── Anywhere else (a trip, a day out) ─────────────────────────────────────────
+
+/** Coordinates for a US place name (OpenStreetMap; cached), or null. */
+async function placePoint(place: string): Promise<{ lat: number; lon: number } | null> {
+  const key = `wx_geo:${place.toLowerCase().trim().slice(0, 120)}`;
+  const hit = await redis.get<{ lat: number; lon: number } | "none">(key).catch(() => null);
+  if (hit) return hit === "none" ? null : hit;
+  const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=${encodeURIComponent(place)}`, { headers: { "user-agent": UA } }).catch(() => null);
+  const j = r?.ok ? ((await r.json().catch(() => [])) as { lat: string; lon: string }[]) : [];
+  const pt = j[0] ? { lat: Math.round(Number(j[0].lat) * 1000) / 1000, lon: Math.round(Number(j[0].lon) * 1000) / 1000 } : null;
+  await redis.set(key, pt || "none", { ex: pt ? 90 * 86400 : 7 * 86400 }).catch(() => {});
+  return pt;
+}
+
+/** Daily outlook lines for a US place ("Asheville, NC"), from its own NWS forecast. Null if the place can't be found. */
+export async function placeOutlook(place: string, date: string, days = 1): Promise<string[] | null> {
+  const pt = await placePoint(place);
+  if (!pt) return null;
+  const key = `wx_hourly_at:${pt.lat},${pt.lon}`;
+  let hrs = await redis.get<HourWx[]>(key).catch(() => null);
+  if (!hrs) {
+    const p = await nws<{ properties: { forecastHourly: string } }>(`https://api.weather.gov/points/${pt.lat},${pt.lon}`);
+    const j = await nws<{ properties: { periods: { startTime: string; temperature: number; probabilityOfPrecipitation?: { value: number | null }; shortForecast: string }[] } }>(p.properties.forecastHourly);
+    hrs = j.properties.periods.map((x) => ({ start: x.startTime, tempF: x.temperature, pop: x.probabilityOfPrecipitation?.value ?? 0, short: x.shortForecast }));
+    await redis.set(key, hrs, { ex: 3600 }).catch(() => {});
+  }
+  const out: string[] = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(Date.parse(`${date}T12:00:00Z`) + i * 86400000).toISOString().slice(0, 10);
+    const day = hrs.filter((h) => wallDate(h.start) === d && wallHour(h.start) >= 8 && wallHour(h.start) <= 19);
+    if (!day.length) { out.push(`${d}: beyond the ~7-day forecast`); continue; }
+    const counts = new Map<string, number>();
+    for (const h of day) counts.set(h.short, (counts.get(h.short) || 0) + 1);
+    const pop = Math.max(...day.map((h) => h.pop));
+    out.push(`${d}: ${[...counts.entries()].sort((a, b) => b[1] - a[1])[0][0]}, ${Math.min(...day.map((h) => h.tempF))}–${Math.max(...day.map((h) => h.tempF))}°F${pop >= 20 ? `, rain ${pop}%` : ""}`);
+  }
+  return out;
+}

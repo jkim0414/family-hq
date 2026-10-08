@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../../_lib/http.js";
-import { createLoginToken, createLoginCode, requestOrigin } from "../../_lib/auth.js";
+import { createLoginToken, createLoginCode, requestOrigin, loginRequestBlocked } from "../../_lib/auth.js";
 import { sendEmail } from "../../_lib/email.js";
 
 // POST /api/auth/request  { email }  — email a 6-digit login code (+ a link).
@@ -11,6 +11,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const email = String(body?.email || "").trim();
     if (!email) return json(res, 400, { error: "email required" });
+    const blocked = await loginRequestBlocked(email);
+    if (blocked) return json(res, 429, { error: blocked });
 
     const [code, token] = await Promise.all([createLoginCode(email), createLoginToken(email)]);
     if (code && token) {
@@ -29,6 +31,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     json(res, 200, { ok: true });
   } catch (err) {
-    json(res, 500, { error: String(err) });
+    console.error("login request failed", (err as Error)?.message);
+    json(res, 500, { error: "Couldn't send the code. Try again in a minute." });
   }
 }

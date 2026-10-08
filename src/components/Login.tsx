@@ -23,8 +23,8 @@ export function Login() {
     try {
       await requestLogin(email.trim());
       setStep("code");
-    } catch {
-      setError("Couldn't send the code — check your connection and try again.");
+    } catch (err) {
+      setError(err instanceof Error && err.message !== "Failed to fetch" ? err.message : "Couldn't send the code — check your connection and try again.");
     } finally {
       setBusy(false);
     }

@@ -41,6 +41,9 @@ export function canSee(item: { privateTo?: Member; audience?: Member[] } | null 
   return viewers(viewer).every((m) => (!item.privateTo || item.privateTo === m) && (!item.audience || item.audience.includes(m)));
 }
 
+/** On the shared Google Calendar (whose invites reach both parents): only what both parents may see. */
+export const onSharedCalendar = (e: { privateTo?: Member; audience?: Member[] }) => !e.privateTo && (!e.audience || PARENTS.every((p) => e.audience!.includes(p)));
+
 /** In a chat, Kimi only uses what every member present may see. */
 export function canSeeAll(item: { privateTo?: Member; audience?: Member[] } | null | undefined, members: Member[]): boolean {
   return !!item && members.every((m) => canSee(item, m));

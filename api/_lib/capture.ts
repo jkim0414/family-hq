@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { classify, profileContext, verifyExtraction } from "./classify.js";
 import { appendItems, getCollection, getProfile, setCollection } from "./db.js";
 import { createCalendarEvent, updateCalendarEvent, findEvents } from "./calendar.js";
@@ -7,7 +8,8 @@ import { extractLinks, fetchLinkedPages } from "./links.js";
 import { completePartyPrep } from "./conventions.js";
 import { closeIfAlreadyDone } from "./verify.js";
 import { CONFIG } from "../../src/data/config.js";
-import type { CalEvent, Comm, Todo, Suggestion } from "../../src/data/types";
+import { canSee, onSharedCalendar } from "./privacy.js";
+import type { Member, CalEvent, Comm, Todo, Suggestion } from "../../src/data/types";
 
 // The "file this" pipeline: classify a note / photo / PDF the same way as a
 // forwarded email and file it (events, to-dos, comm record, metadata), with
@@ -19,6 +21,13 @@ export interface CaptureInput {
   images?: { mediaType?: string; data: string }[];
   /** Suppress calendar guest invites (verification tests must not email Sam). */
   silent?: boolean;
+  /**
+   * Where it was said (a chat's reach: one member, or the chat's members). The filed message
+   * itself always stays there; with `keep`, so do the events and to-dos (they never reach the
+   * shared calendar, and never merge into a shared event).
+   */
+  scope?: { privateTo?: Member; audience?: Member[] };
+  keep?: boolean;
 }
 
 export interface CaptureResult {
@@ -91,12 +100,12 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   const now = new Date().toISOString();
   const today = todayLocal();
 
-  // Private items (a parent's Just-me chat) are never matched, shown to the classifier, or updated by filing.
+  // Private and chat-kept items (a Just-me chat, a chat with Grandma) are never matched, shown to the classifier, or updated by filing.
   const [existingEvents, existingComms, existingSuggestions, existingTodos] = await Promise.all([
-    getCollection("events").then((xs) => xs.filter((e) => !e.privateTo)),
+    getCollection("events").then((xs) => xs.filter((e) => canSee(e, "family"))),
     getCollection("comms"),
     getCollection("suggestions"),
-    getCollection("todos").then((xs) => xs.filter((t) => !t.privateTo)),
+    getCollection("todos").then((xs) => xs.filter((t) => canSee(t, "family"))),
   ]);
 
   // Reference dates so the model can resolve "start of school year" / "first Friday".
@@ -123,7 +132,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     : "";
   const openTodos = existingTodos.filter((t) => !t.done).slice(0, 60);
   const todosCtx = openTodos.length ? "OPEN TO-DOS (id | due | title):\n" + openTodos.map((t) => `${t.id} | due ${t.due || "—"} | ${t.title}`).join("\n") : "";
-  const context = [refDates, profileContext(await getProfile()), eventsCtx, todosCtx].filter(Boolean).join("\n\n");
+  const context = [refDates, profileContext(await getProfile().then((p) => ({ ...p, facts: p.facts.filter((f) => canSee(f, "family")) }))), eventsCtx, todosCtx].filter(Boolean).join("\n\n");
 
   const linked = text ? await fetchLinkedPages(extractLinks(text)).catch(() => "") : "";
   const c = await classify({
@@ -184,16 +193,17 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
           ? ({ kind: "edit_events", eventIds: ids, set: cmd.set || {} } as const)
           : ({ kind: "delete_events", eventIds: ids } as const);
       const sug: Suggestion = {
-        id: `sug-cmd-${Date.now().toString(36)}`,
+        id: `sug-cmd-${randomBytes(9).toString("base64url")}`,
         description: `${cmd.description} (${matches.length} event${matches.length > 1 ? "s" : ""})`,
         op,
         createdAt: now,
       };
-      await setCollection("suggestions", [...existingSuggestions, sug]);
+      await appendItems("suggestions", [sug]);
     }
     return { ok: true, command: true, count: matches.length, description: cmd.description };
   }
 
+  const kept = input.keep && (input.scope?.privateTo || input.scope?.audience) ? { ...input.scope } : null;
   const base = `cap-${Date.now().toString(36)}`;
   const commId = `comm-${base}`;
   const newEvents: CalEvent[] = [];
@@ -243,7 +253,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
       createdAt: now,
       commId,
     };
-    await setCollection("suggestions", [...existingSuggestions, sug]);
+    await appendItems("suggestions", [sug]);
     deletesQueued = delTargets.length;
   };
 
@@ -283,9 +293,10 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
       source: c.source,
       commId,
     };
-    // Update an existing similar event in place instead of duplicating.
+    if (kept) Object.assign(candidate, kept);
+    // Update an existing similar event in place instead of duplicating (a kept one never touches shared ones).
     const match =
-      existingEvents.find((ex) => eventsSimilar(ex, candidate)) ||
+      (kept ? undefined : existingEvents.find((ex) => eventsSimilar(ex, candidate))) ||
       newEvents.find((ex) => eventsSimilar(ex, candidate));
     if (match) {
       mergeEventDetails(match, candidate);
@@ -308,8 +319,8 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     const ownerSrc = Array.isArray(t.owner) && t.owner.length ? t.owner : c.owner;
     const owner = ownerSrc.length ? ownerSrc : ["alex", "sam"];
     const people = Array.isArray(t.people) && t.people.length ? t.people : c.people;
-    const todo: Todo = adjustPrepDue({ id: `todo-${base}-${i}`, title: t.title, detail: t.detail, due: t.due, people, owner, priority: t.priority, done: false, source: c.source, commId }, eventDates);
-    const dup = [...existingTodos, ...newTodos].find((x) => !x.done && todosSimilar(x, todo));
+    const todo: Todo = adjustPrepDue({ id: `todo-${base}-${i}`, title: t.title, detail: t.detail, due: t.due, people, owner, priority: t.priority, done: false, source: c.source, commId, ...(kept || {}) }, eventDates);
+    const dup = [...(kept ? [] : existingTodos), ...newTodos].find((x) => !x.done && todosSimilar(x, todo));
     if (dup) {
       todoIds.push(dup.id);
       return;
@@ -320,6 +331,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   await closeIfAlreadyDone(newTodos, linked);
 
   for (const evt of newEvents) {
+    if (!onSharedCalendar(evt)) continue;
     try {
       const gcalId = await createCalendarEvent(evt, { silent });
       if (gcalId) evt.gcalId = gcalId;
@@ -351,6 +363,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     raw: text || "(image attachment)",
     eventIds,
     todoIds,
+    ...(input.scope || {}),
   };
 
   await appendItems("comms", [comm]);

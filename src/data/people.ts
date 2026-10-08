@@ -20,6 +20,12 @@ export const PEOPLE: Person[] = [
   { id: "ava", name: "Ava", color: "#db2777", kind: "kid" },
 ];
 
+// Other names the family uses (full names, given names) are registered by the server
+// (api/_lib/db.ts) — never listed here: this file ships in the app.
+export function registerAliases(byId: Record<string, string[]>): void {
+  for (const p of PEOPLE) if (byId[p.id]) p.aliases = [...new Set([...(p.aliases || []), ...byId[p.id]])];
+}
+
 export const personById = (id: string) => {
   const k = (id || "").toLowerCase();
   return PEOPLE.find((p) => p.id === id || p.name.toLowerCase() === k || p.aliases?.some((a) => a.toLowerCase() === k));

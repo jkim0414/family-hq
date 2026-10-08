@@ -9,15 +9,18 @@ import { runWatch, type WatchStats } from "../_lib/watch.js";
 import { sweepVerifiable } from "../_lib/verify.js";
 import { updateTravelTimes, checkLeaveAlerts } from "../_lib/travel.js";
 import { ensureGroups } from "../_lib/groupsms.js";
+import { outwardEnabled } from "../_lib/sandbox.js";
 
 // Senders that are infrastructure noise, never school comms.
 const SKIP_SENDERS = [/accounts\.google\.com/i, /no-?reply@google/i, /mailer-daemon/i];
 
-// GET/POST /api/ingest?secret=... — the heartbeat (cron-job.org, every minute):
+// GET/POST /api/ingest (Authorization: Bearer CRON_SECRET) — the heartbeat (cron-job.org, every minute):
 // resume agent tasks, mirror the calendar, file new mail from the forwarding
 // inbox, and watch the parents' own inboxes. Idempotent via seen tracking.
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
+  // ?probe=1: is this deployment allowed to write the calendar and send messages? (Local runs aren't.)
+  if (req.query.probe === "1") return json(res, 200, { outward: outwardEnabled(), vercel: !!process.env.VERCEL });
   const quiet = req.query.quiet === "1"; // suppress alert emails + calendar invites (bulk backlog)
   const started = Date.now();
 

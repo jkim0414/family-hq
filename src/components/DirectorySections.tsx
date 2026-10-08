@@ -1,12 +1,10 @@
 import { useState } from "react";
-import { KIDS, kidById, formatPhone } from "../store";
+import { formatPhone } from "../store";
 import { useData, newId } from "../dataStore";
 import { Card, PeopleChips, Collapsible, TextAction } from "./ui";
 import { EntityForm, type FieldDef } from "./EntityForm";
 
 // Places, contacts, and drop-off / pick-up routines — the editable directory.
-
-const KID_OPTS = KIDS.map((k) => ({ value: k.id, label: k.firstName }));
 
 const PLACE_FIELDS: FieldDef[] = [
   { key: "name", label: "Name", required: true },
@@ -36,8 +34,9 @@ const CONTACT_FIELDS: FieldDef[] = [
   { key: "kidIds", label: "Kids", type: "kids" },
 ];
 
-const ROUTINE_FIELDS: FieldDef[] = [
-  { key: "kidId", label: "Kid", type: "select", options: KID_OPTS },
+// The kid options come from the signed-in data (routineFields below).
+const routineFields = (kids: { id: string; firstName: string }[]): FieldDef[] => [
+  { key: "kidId", label: "Kid", type: "select", options: kids.map((k) => ({ value: k.id, label: k.firstName })) },
   { key: "label", label: "Label", placeholder: "Drop-off / Pick-up" },
   { key: "detail", label: "Detail", type: "textarea" },
 ];
@@ -51,7 +50,7 @@ export function DirectorySections() {
   const readOnly = data.me?.role === "caregiver";
   const setEditing = (e: Editing) => !readOnly && setEditingState(e);
 
-  const fieldsFor = (k: string) => (k === "places" ? PLACE_FIELDS : k === "contacts" ? CONTACT_FIELDS : ROUTINE_FIELDS);
+  const fieldsFor = (k: string) => (k === "places" ? PLACE_FIELDS : k === "contacts" ? CONTACT_FIELDS : routineFields(data.kids));
   const titleFor = (k: string) => ({ places: "place", contacts: "contact", routines: "routine" })[k];
 
   return (
@@ -111,7 +110,7 @@ export function DirectorySections() {
           {data.routines.map((r) => (
             <button key={r.id} type="button" className="block w-full px-4 py-3 text-left" onClick={() => setEditing({ kind: "routines", item: r })}>
               <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-ink">{kidById(r.kidId)?.firstName}</span>
+                <span className="text-sm font-semibold text-ink">{data.kids.find((k) => k.id === r.kidId)?.firstName}</span>
                 <span className="text-xs text-ink-3">{r.label}</span>
               </div>
               <div className="text-sm text-ink-2">{r.detail || <span className="text-ink-4">— add detail —</span>}</div>

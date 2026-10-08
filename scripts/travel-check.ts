@@ -9,7 +9,7 @@ for (const line of readFileSync(".env.local", "utf8").split("\n")) {
   if (m) process.env[m[1]] = m[2].trim();
 }
 const db = await import("../api/_lib/db");
-const { createSession, userById } = await import("../api/_lib/auth");
+const { createSession, userById, endSession } = await import("../api/_lib/auth");
 const { travelSecret, listTravelers } = await import("../api/_lib/travelers");
 const { normalizeProfile, renderFacts } = await import("../src/data/facts");
 const { createFile, updateFile, renderFile } = await import("../api/_lib/files");
@@ -80,7 +80,7 @@ try {
 
   // ── Screenshots ──
   const a = await proposeAction({ kind: "confirm_step", title: "(travel-check) step", summary: "test", payload: { taskId: "task-web-x", description: "(travel-check)", screenshot: "AAAA" } as any, requestedBy: "agent", channel: "app" });
-  cleanup.push(async () => { await db.setCollection("actions", (await db.getCollection("actions")).filter((x) => x.id !== a.id)); await db.redis.del(`action_shot:${a.id}`); });
+  cleanup.push(async () => { await db.removeItems("actions", [a.id]); await db.redis.del(`action_shot:${a.id}`); });
   const stored = (await db.getCollection("actions")).find((x) => x.id === a.id);
   check("approval screenshots are stored outside the list", !(stored?.payload as any).screenshot && (stored?.payload as any).hasScreenshot === true && (await actionScreenshot(stored!)) === "AAAA");
 
@@ -120,7 +120,7 @@ try {
   if (Object.keys(snapshot).length) await db.redis.hset("travelers", snapshot);
   const audit = await db.getCollection("audit");
   await db.setCollection("audit", audit.filter((x) => !/travel-check|Theo's travel card/.test(String(x.summary))));
-  await db.redis.del(`session:${alex}`, `session:${grandma}`);
+  await endSession(alex); await endSession(grandma);
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 }

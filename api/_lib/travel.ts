@@ -1,3 +1,4 @@
+import { canSee } from "./privacy.js";
 import { redis, getProfile, getCollection, setCollection } from "./db.js";
 import { notify } from "./notify.js";
 import { toHomeZone, fmt12, HOME_TZ } from "../../src/data/tz.js";
@@ -71,8 +72,9 @@ export async function geocode(place: string): Promise<Pt | null> {
 
 export async function homeAddress(): Promise<string | null> {
   const body = (await getProfile()).facts.filter((f) => f.topic === "home").map((f) => f.text).join("\n");
-  const line = body.split("\n").find((l) => /\d+ .+\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|way|blvd|ct|court|pl|place)\b/i.test(l)) || body.split("\n")[0];
-  return line?.trim() || null;
+  // Only a street address goes to the map service — never another home note (a gate code, the alarm).
+  const m = body.match(/\d+ [^\n,]*\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|way|blvd|ct|court|pl|place)\b[^\n]*?(,\s*[A-Za-z .]+)?(,?\s*[A-Z]{2})?(\s*\d{5})?/i);
+  return m ? m[0].trim() : null;
 }
 
 /** Estimated minutes to drive from home to `place`, or null if it can't be placed/routed. */
@@ -154,7 +156,8 @@ export async function checkLeaveAlerts(): Promise<number> {
     if (until > 15 || until < 4) continue;
     if (!(await redis.set(`leave_alert:${e.id}:${today}`, "1", { nx: true, ex: 2 * 86400 }).catch(() => null))) continue;
     const owners = ownerOf(e).filter((o): o is Member => o === "alex" || o === "sam" || o === "grandma");
-    const to: Member[] = e.privateTo ? [e.privateTo] : owners.length ? owners : ["alex", "sam"];
+    // Only people who may see the event (one kept in a chat never reaches someone outside it).
+    const to: Member[] = (e.privateTo ? [e.privateTo] : owners.length ? owners : e.audience?.length ? e.audience : (["alex", "sam"] as Member[])).filter((m) => canSee(e, m));
     const text = `🚗 Leave by ${fmt12(leave)} for ${e.title} (about ${e.travelMin} min drive${e.location ? ` to ${e.location}` : ""}).`;
     for (const p of to) await notify(p, text, "app", { emailFallback: false }).catch((err) => console.error("leave alert failed", err));
     sent++;

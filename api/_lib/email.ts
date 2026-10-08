@@ -1,3 +1,4 @@
+import { localSkip } from "./sandbox.js";
 import nodemailer from "nodemailer";
 import { CONFIG } from "../../src/data/config.js";
 
@@ -22,6 +23,7 @@ export async function sendEmail(
   html: string,
   opts?: { text?: string; to?: string[]; cc?: string[]; replyTo?: string; fromName?: string }
 ) {
+  if (localSkip(`email "${subject.slice(0, 40)}"`)) return;
   const from = `"${opts?.fromName || "Kimi · Family HQ"}" <${process.env.SMTP_USER || process.env.IMAP_USER}>`;
   await transport().sendMail({
     from,

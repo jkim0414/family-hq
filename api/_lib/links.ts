@@ -1,3 +1,5 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { htmlToText } from "../../src/data/text.js";
 import * as web from "./browser.js";
 import type { Attachment } from "./imap.js";
@@ -13,6 +15,53 @@ import type { Attachment } from "./imap.js";
 export interface Link {
   label: string;
   url: string;
+}
+
+/**
+ * Fetch only public web addresses, checking every redirect hop: a link in an email must never
+ * make the server read something on its own network (cloud metadata, localhost, a private range).
+ */
+function privateIp(ip: string): boolean {
+  if (isIP(ip) === 6) {
+    const v = ip.toLowerCase();
+    if (v === "::1" || v === "::" || v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe80")) return true;
+    const m = v.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    return m ? privateIp(m[1]) : false;
+  }
+  const [a, b] = ip.split(".").map(Number);
+  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+}
+
+async function publicUrl(u: string): Promise<URL | null> {
+  let url: URL;
+  try {
+    url = new URL(u);
+  } catch {
+    return null;
+  }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
+  if (url.port && !["80", "443"].includes(url.port)) return null;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (/^(localhost|.*\.local|.*\.internal)$/i.test(host)) return null;
+  const addrs = isIP(host) ? [{ address: host }] : await lookup(host, { all: true }).catch(() => []);
+  if (!addrs.length || addrs.some((a) => privateIp(a.address))) return null;
+  return url;
+}
+
+/** fetch() that follows at most 5 redirects, each to a public address. */
+export async function safeFetch(u: string, init: RequestInit = {}): Promise<Response | null> {
+  let next = u;
+  for (let hop = 0; hop < 6; hop++) {
+    const url = await publicUrl(next);
+    if (!url) return null;
+    const r = await fetch(url, { ...init, redirect: "manual" });
+    if (r.status >= 300 && r.status < 400 && r.headers.get("location")) {
+      next = new URL(r.headers.get("location")!, url).toString();
+      continue;
+    }
+    return r;
+  }
+  return null;
 }
 
 const MAX_LINKS = 3;
@@ -59,8 +108,8 @@ async function fetchText(url: string): Promise<{ text: string; finalUrl: string 
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const r = await fetch(url, { redirect: "follow", signal: ctl.signal, headers: { "user-agent": "Mozilla/5.0 (FamilyHQ; +https://your-app.vercel.app)", accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5" } });
-    if (!r.ok) return null;
+    const r = await safeFetch(url, { signal: ctl.signal, headers: { "user-agent": "Mozilla/5.0 (compatible; family-assistant)", accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5" } });
+    if (!r || !r.ok) return null;
     const ct = r.headers.get("content-type") || "";
     if (!/text\/html|text\/plain|application\/xhtml/i.test(ct)) return null;
     const raw = (await r.text()).slice(0, 600_000);
@@ -76,10 +125,13 @@ async function fetchText(url: string): Promise<{ text: string; finalUrl: string 
 /** Render a JS-heavy page in the hosted browser (best-effort, one page, short). */
 // Hosted-browser time is metered; only render the invite platforms that are
 // known to need JavaScript. Everything else gets the plain fetch only.
-const RENDER_RE = /evite\.com|paperlesspost\.com|punchbowl\.com|partiful\.com|signupgenius\.com|greenvelope\.com/i;
+const RENDER_HOST_RE = /(^|\.)(evite\.com|paperlesspost\.com|punchbowl\.com|partiful\.com|signupgenius\.com|greenvelope\.com)$/i;
 
 async function renderText(url: string): Promise<string | null> {
-  if (!web.browserConfigured() || !RENDER_RE.test(url)) return null;
+  // By the page's own host (not anywhere in the URL): this browser is signed in to the family's sites.
+  let host = "";
+  try { host = new URL(url).hostname; } catch { return null; }
+  if (!web.browserConfigured() || !RENDER_HOST_RE.test(host)) return null;
   let handle: web.BrowserHandle | null = null;
   try {
     handle = await web.openBrowser();
@@ -156,8 +208,8 @@ export async function fetchLinkedPdfs(links: Link[], max = 2): Promise<Attachmen
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const r = await fetch(url, { redirect: "follow", signal: ctl.signal });
-      if (!r.ok) continue;
+      const r = await safeFetch(url, { signal: ctl.signal });
+      if (!r || !r.ok) continue;
       const buf = Buffer.from(await r.arrayBuffer());
       // Drive answers non-PDF files (and big-file warnings) with HTML — only a real PDF counts.
       if (buf.length > MAX_PDF_BYTES || buf.subarray(0, 5).toString() !== "%PDF-") continue;

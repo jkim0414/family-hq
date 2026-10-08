@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { getCollection, setCollection, addAudit, getTask, saveTask, redis } from "./db.js";
+import { getCollection, setCollection, addAudit, getTask, saveTask, redis, appendItems, trimCollection } from "./db.js";
 import { sendEmail } from "./email.js";
 import { userById } from "./auth.js";
 import type { Action, ActionKind, EmailPayload, StepPayload, Channel, Member } from "../../src/data/types";
@@ -57,9 +57,8 @@ export async function proposeAction(input: {
     const { screenshot: _s, ...rest } = action.payload as StepPayload;
     action.payload = { ...rest, hasScreenshot: true };
   }
-  const actions = await getCollection("actions");
-  actions.push(action);
-  await setCollection("actions", actions.slice(-200));
+  await appendItems("actions", [action]);
+  await trimCollection("actions", 200);
   await addAudit({ kind: "proposed", summary: `${action.title} — awaiting approval`, by: "agent", ref: action.id, privateTo: action.privateTo, audience: action.audience });
   return action;
 }
@@ -72,10 +71,42 @@ export async function actionScreenshot(a: Action): Promise<string | null> {
   return (await redis.get<string>(shotKey(a.id))) ?? (a.payload as StepPayload).screenshot ?? null;
 }
 
-/** The newest approval waiting on this parent (shared ones, or their own private ones). */
+/**
+ * Approvals waiting on this parent, newest first (shared ones, or their own private ones). With a
+ * thread: only that chat's (a group text approves only what was asked in that group).
+ */
+export async function pendingFor(who: Member, thread?: string): Promise<Action[]> {
+  const actions = await getCollection("actions");
+  return [...actions].reverse().filter((a) => a.status === "proposed" && canSeeArtifact(a, who) && (!thread || a.thread === thread));
+}
+
+/** The newest approval waiting on this parent. */
 export async function latestPending(who?: Member): Promise<Action | null> {
   const actions = await getCollection("actions");
   return [...actions].reverse().find((a) => a.status === "proposed" && (!who || canSeeArtifact(a, who))) || null;
+}
+
+/** A short code for naming one approval in a text ("APPROVE 4821"). */
+export function approvalCode(a: { id: string }): string {
+  let h = 0;
+  for (const ch of a.id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return String(1000 + (h % 9000));
+}
+
+/**
+ * Which approval a texted APPROVE/DECLINE means: the only one waiting, or the one whose code it
+ * names. Several waiting and no code: ask which (never guess — the newest isn't always the one
+ * they were looking at).
+ */
+export function pickPending(pending: Action[], code: string | undefined): { action?: Action; ask?: string } {
+  if (!pending.length) return { ask: "Nothing is waiting for approval right now." };
+  if (code) {
+    const a = pending.find((x) => approvalCode(x) === code);
+    return a ? { action: a } : { ask: `No approval with code ${code} is waiting.` };
+  }
+  if (pending.length === 1) return { action: pending[0] };
+  const list = pending.slice(0, 5).map((a) => `${approvalCode(a)}: ${a.title.slice(0, 80)}`).join("\n");
+  return { ask: `${pending.length} things are waiting. Reply APPROVE or DECLINE with the code:\n${list}` };
 }
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -106,6 +137,8 @@ async function perform(action: Action, by: "alex" | "sam"): Promise<string> {
 }
 
 export async function decideAction(id: string, decision: "approve" | "decline", by: "alex" | "sam"): Promise<Action> {
+  // One decision per approval, even when the app and a text arrive at once.
+  if (!(await redis.set(`action_lock:${id}`, by, { nx: true, ex: 120 }))) throw new Error("action already being decided");
   const actions = await getCollection("actions");
   const a = actions.find((x) => x.id === id);
   if (!a) throw new Error("action not found");

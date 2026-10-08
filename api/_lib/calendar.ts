@@ -1,9 +1,11 @@
+import { localSkip } from "./sandbox.js";
 import { google, calendar_v3 } from "googleapis";
 import { CONFIG } from "../../src/data/config.js";
 import { utcToWall } from "../../src/data/tz.js";
 import { htmlToText } from "../../src/data/text.js";
 import { extractLinks, type Link } from "./links.js";
 import { redis } from "./db.js";
+import { seal, unseal, type Sealed } from "./vault.js";
 import { titlesSimilar, nextDay, prevDay } from "./util.js";
 import type { CalEvent } from "../../src/data/types";
 
@@ -11,7 +13,12 @@ import type { CalEvent } from "../../src/data/types";
 // one-time consent flow, or via env). Returns null/skips gracefully if not configured.
 async function getRefreshToken(): Promise<string | null> {
   if (process.env.GOOGLE_REFRESH_TOKEN) return process.env.GOOGLE_REFRESH_TOKEN;
-  return (await redis.get<string>("google_refresh_token")) || null;
+  return unseal(await redis.get<Sealed>("google_refresh_token"));
+}
+
+/** Save the family calendar's Google connection (encrypted at rest). */
+export async function setCalendarToken(refreshToken: string): Promise<void> {
+  await redis.set("google_refresh_token", seal(refreshToken));
 }
 
 export async function getCal(): Promise<calendar_v3.Calendar | null> {
@@ -51,6 +58,7 @@ export async function createCalendarEvent(
   evt: CalEvent,
   opts?: { silent?: boolean }
 ): Promise<string | null> {
+  if (localSkip("Google Calendar: createCalendarEvent")) return null;
   const cal = await getCal();
   if (!cal) return null;
 
@@ -80,6 +88,7 @@ export async function createCalendarEvent(
 }
 
 export async function updateCalendarEvent(evt: CalEvent, opts?: { silent?: boolean }): Promise<string | null> {
+  if (localSkip("Google Calendar: updateCalendarEvent")) return null;
   const cal = await getCal();
   if (!cal) return null;
   // No gcalId yet → create it now.
@@ -94,6 +103,19 @@ export async function updateCalendarEvent(evt: CalEvent, opts?: { silent?: boole
     return evt.gcalId;
   } catch {
     return evt.gcalId;
+  }
+}
+
+/** True only when Google confirms the event was deleted (cancelled, or gone). Any doubt → false. */
+export async function calendarEventGone(gcalId: string): Promise<boolean> {
+  const cal = await getCal();
+  if (!cal || !gcalId) return false;
+  try {
+    const r = await cal.events.get({ calendarId: CONFIG.calendar.targetCalendarId, eventId: gcalId });
+    return r.data.status === "cancelled";
+  } catch (e) {
+    const code = (e as { code?: number; status?: number }).code ?? (e as { status?: number }).status;
+    return code === 404 || code === 410;
   }
 }
 
@@ -136,6 +158,7 @@ export async function patchCalendarEvent(
   gcalId: string,
   set: { date?: string; start?: string; end?: string; location?: string; title?: string }
 ): Promise<void> {
+  if (localSkip("Google Calendar: patchCalendarEvent")) return;
   const cal = await getCal();
   if (!cal) return;
   const tz = CONFIG.calendar.timeZone;
@@ -180,6 +203,7 @@ export async function patchCalendarEvent(
 }
 
 export async function deleteCalendarEvent(gcalId: string): Promise<void> {
+  if (localSkip("Google Calendar: deleteCalendarEvent")) return;
   const cal = await getCal();
   if (!cal) return;
   try {
@@ -209,6 +233,8 @@ export interface RawCalendarEvent {
   eventType?: string;
   recurringEventId?: string; // set when this is an instance of a recurring series
   declined: boolean; // the account itself declined this event
+  /** An invitation from someone outside the family that nobody has accepted yet. */
+  strangerInvite?: boolean;
   updated: string; // RFC3339 last-modified timestamp (drives edit detection)
 }
 
@@ -218,19 +244,34 @@ export async function listCalendarEvents(from: string, to: string): Promise<RawC
   const cal = await getCal();
   if (!cal) return [];
   const tz = CONFIG.calendar.timeZone;
-  const res = await cal.events.list({
-    calendarId: CONFIG.calendar.targetCalendarId,
-    timeMin: `${prevDay(from)}T00:00:00Z`,
-    timeMax: `${nextDay(to)}T00:00:00Z`,
-    singleEvents: true,
-    maxResults: 250,
-    orderBy: "startTime",
-  });
-  return (res.data.items || [])
+  // Every page: a busy stretch can pass 250 events, and a truncated list would make events look deleted.
+  const items: calendar_v3.Schema$Event[] = [];
+  let pageToken: string | undefined;
+  for (let i = 0; i < 8; i++) {
+    const res = await cal.events.list({
+      calendarId: CONFIG.calendar.targetCalendarId,
+      timeMin: `${prevDay(from)}T00:00:00Z`,
+      timeMax: `${nextDay(to)}T00:00:00Z`,
+      singleEvents: true,
+      maxResults: 250,
+      orderBy: "startTime",
+      pageToken,
+    });
+    items.push(...(res.data.items || []));
+    pageToken = res.data.nextPageToken || undefined;
+    if (!pageToken) break;
+  }
+  return items
     .filter((e) => e.status !== "cancelled")
     .map((e): RawCalendarEvent => {
       const allDay = !e.start?.dateTime;
       const declined = (e.attendees || []).some((a) => a.self && a.responseStatus === "declined");
+      // Anyone can put an invitation on a Google Calendar. One from outside the family that no one
+      // has accepted is a stranger's text, not the family's plan.
+      const family = [CONFIG.calendar.targetCalendarId, CONFIG.parents.alex.email, CONFIG.parents.sam.email, ...CONFIG.calendar.alwaysInvite].map((x) => String(x || "").toLowerCase());
+      const organizer = (e.organizer?.email || "").toLowerCase();
+      const me = (e.attendees || []).find((a) => a.self);
+      const strangerInvite = !!organizer && !e.organizer?.self && !family.includes(organizer) && (!me || me.responseStatus === "needsAction");
       // Timed events: the offset-bearing dateTime is the ONLY trustworthy time.
       // (The API renders dateTime in the response zone while `timeZone` is the
       // event's creation zone — pairing a sliced wall-clock with that field
@@ -240,7 +281,12 @@ export async function listCalendarEvents(from: string, to: string): Promise<RawC
       let start: string | undefined;
       let end: string | undefined;
       let endDate: string | undefined;
-      if (!allDay) {
+      if (allDay) {
+        // All-day end is exclusive: a Mon–Fri break ends "Saturday". Without this every multi-day
+        // all-day event read back as its first day only (a week-long break filed as just its Monday).
+        const last = e.end?.date ? prevDay(e.end.date.slice(0, 10)) : date;
+        if (last > date) endDate = last;
+      } else {
         const s = utcToWall(new Date(e.start!.dateTime!), tz);
         date = s.date;
         start = s.time;
@@ -266,6 +312,7 @@ export async function listCalendarEvents(from: string, to: string): Promise<RawC
         eventType: e.eventType || "default",
         recurringEventId: e.recurringEventId || undefined,
         declined,
+        strangerInvite,
         updated: e.updated || "",
       };
     })

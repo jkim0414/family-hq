@@ -1,3 +1,4 @@
+import { CONFIG } from "../../src/data/config.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../_lib/http.js";
 import { requireParent } from "../_lib/auth.js";
@@ -46,7 +47,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
     };
     const [alex, sam] = await Promise.all([status("alex"), status("sam")]);
-    json(res, 200, { alex, sam, shareWith: "alex@example.com" });
+    json(res, 200, { alex, sam, shareWith: CONFIG.calendar.targetCalendarId });
   } catch (err) {
     json(res, 500, { error: String(err) });
   }

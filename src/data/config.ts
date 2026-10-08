@@ -1,3 +1,4 @@
+import { HOME_TZ } from "./tz.js";
 // ─────────────────────────────────────────────────────────────────────────────
 // Your household's configuration. EDIT THIS for your family.
 // The two parents' ids ("alex", "sam") are used throughout the code as the
@@ -26,10 +27,17 @@ export const CONFIG = {
     targetCalendarId: "alex@example.com",
     // Every kid-related event invites these guests.
     alwaysInvite: ["sam@example.com"],
-    timeZone: "America/Los_Angeles",
+    timeZone: HOME_TZ,
     // Mirror events added directly to that calendar into the app (and infer prep to-dos).
     importPersonal: true,
   },
+
+  // Airports the family flies from: a work-calendar trip hold to anywhere else is "traveling".
+  homeAirports: [] as string[], // EDIT: e.g. ["JFK", "LGA"]
+
+  // Identifying strings that appear only in prose (work domains, a surname): the public-bundle
+  // check (build-checks/bundle-pii.ts) fails the build if one ships.
+  bundleTerms: [] as string[], // EDIT: e.g. your work email domains, a surname
 
   // Optional dedicated inbox that parents forward school email to (read over IMAP;
   // credentials in .env.local / your host's environment, never in code).

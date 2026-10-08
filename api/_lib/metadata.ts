@@ -1,4 +1,4 @@
-import { getCollection, setCollection, redis } from "./db.js";
+import { getCollection, setCollection, redis, appendItems } from "./db.js";
 import type { MetadataOp, Kid, Contact, Routine, Suggestion } from "../../src/data/types";
 
 function genId(p: string) {
@@ -79,7 +79,9 @@ export function toOp(m: any): MetadataOp | null {
 export async function applyMetadata(
   changes: any[] | undefined,
   commId: string,
-  now: string
+  now: string,
+  /** May these apply on their own? (Otherwise every change waits for a parent.) */
+  trusted = true
 ): Promise<{ applied: number; suggested: number }> {
   if (!changes?.length) return { applied: 0, suggested: 0 };
   const [kids, contacts, routines, suggestions] = await Promise.all([
@@ -96,7 +98,7 @@ export async function applyMetadata(
   for (const m of changes) {
     const op = toOp(m);
     if (!op) continue;
-    if (m.confident) {
+    if (m.confident && trusted) {
       applyOp(op, ctx).forEach((c) => changedCollections.add(c));
       applied++;
     } else {
@@ -107,7 +109,7 @@ export async function applyMetadata(
   if (changedCollections.has("kids")) await setCollection("kids", kids);
   if (changedCollections.has("contacts")) await setCollection("contacts", contacts);
   if (changedCollections.has("routines")) await setCollection("routines", routines);
-  if (newSuggestions.length) await setCollection("suggestions", [...suggestions, ...newSuggestions]);
+  if (newSuggestions.length) await appendItems("suggestions", newSuggestions);
 
   return { applied, suggested: newSuggestions.length };
 }
@@ -157,6 +159,6 @@ export async function ensureSeasonalSuggestions(now: string): Promise<number> {
       notBefore: startDate,
     });
   }
-  if (additions.length) await setCollection("suggestions", [...suggestions, ...additions]);
+  if (additions.length) await appendItems("suggestions", additions);
   return additions.length;
 }

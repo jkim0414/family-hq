@@ -99,6 +99,9 @@ export interface Comm {
   hasRaw?: boolean;
   /** Which mailbox it came from: the forwarding inbox, or a parent's own Gmail (watched). */
   mailbox?: "school" | "alex" | "sam";
+  /** Filed from a chat: it stays with that chat's people (one member, or its members). */
+  privateTo?: Member;
+  audience?: Member[];
   /** IDs of events / todos spun out of this comm. */
   eventIds?: string[];
   todoIds?: string[];
@@ -247,6 +250,8 @@ export interface Fact {
   about?: string[];
   text: string;
   updatedAt: string;
+  /** Kept within a chat's people (e.g. the parents, from their chat): absent = everyone in the household. */
+  audience?: Member[];
 }
 export interface HouseholdProfile {
   facts: Fact[];
@@ -430,6 +435,8 @@ export interface Task {
   parentThread?: string;
   /** A parent approved the pending step after seeing the safety check's flag on it (it's their call). */
   guardOverride?: boolean;
+  /** Checks only: who a throwaway chat stands in for, e.g. the group chat with Grandma. */
+  members?: Member[];
   /** Waiting for a person to take over the browser (a CAPTCHA): where, why, who may, and the session they opened. */
   takeover?: { token: string; reason: string; url: string; at: string; to: Member[]; sessionId?: string };
   channel: Channel; // where the last message came from (and where replies go)

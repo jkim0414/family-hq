@@ -4,9 +4,9 @@ import { validTwilioSignature, SMS_HELP, OPT_OUT_WORDS } from "../_lib/twilio.js
 import { groupForSid, sendGroup, fetchGroupMedia, closeGroupAfterStop, KIMI_IDENTITY } from "../_lib/groupsms.js";
 import { redis } from "../_lib/db.js";
 import { userForPhone, smsConfigured, getSmsOptIn, setSmsOptIn } from "../_lib/notify.js";
-import { converse, appendExchange } from "../_lib/agent.js";
-import { runCapture, describeCapture } from "../_lib/capture.js";
-import { latestPending, decideAction } from "../_lib/actions.js";
+import { converse } from "../_lib/agent.js";
+import { coalesce } from "../_lib/coalesce.js";
+import { pendingFor, pickPending, decideAction } from "../_lib/actions.js";
 import { parseReactionText } from "../_lib/reactions.js";
 import { handleReaction } from "../_lib/tapbacks.js";
 import { isParent, memberName, threadMembers } from "../_lib/privacy.js";
@@ -30,13 +30,12 @@ type PendingAsk = { at: string; who: Member; text: string };
 const fresh = (at: string, ms: number) => Date.now() - Date.parse(at) < ms;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** File a group photo (or PDF) with the words that came with it, and say what was filed. */
-async function fileFromGroup(thread: string, who: Member, text: string, chatServiceSid: string, media: string, note = "by group text"): Promise<void> {
+/** A group photo (or PDF) goes to Kimi with the words that came with it: she files it, or uses it for what was asked. */
+async function fileFromGroup(thread: string, who: Member, text: string, chatServiceSid: string, media: string): Promise<void> {
   const files = await fetchGroupMedia(chatServiceSid, media);
   if (!files.length) return void (await sendGroup(thread, "I couldn't open that attachment. Send a photo (JPEG or PNG) or a PDF, or add it in Family HQ."));
-  const reply = describeCapture(await runCapture({ text, images: files }));
-  await withThread(() => appendExchange(thread, who, "group", `${text || "(no note)"}\n📎 ${files.length} ${files.length === 1 ? "attachment" : "attachments"} ${note}`, reply));
-  await sendGroup(thread, reply);
+  const { reply } = await withThread(() => converse(thread, who, "group", text, Date.now() + 200_000, { attachments: files }));
+  if (reply) await sendGroup(thread, reply);
 }
 
 /** The chat may be mid-turn (the app, a schedule); wait a little for it. */
@@ -86,10 +85,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
         // Approve / decline by text — in a group only as the whole message, so "ok, see you at 5"
         // between the parents never approves anything.
-        if (isParent(who) && /^(approve|decline)$/i.test(text)) {
-          const pending = await latestPending(who);
-          if (!pending) return void (await sendGroup(thread, "Nothing is waiting for approval right now."));
-          const a = await decideAction(pending.id, /^approve/i.test(text) ? "approve" : "decline", who);
+        // Only this group's own approvals: an APPROVE here never acts on (or announces) one from another chat.
+        const said = text.trim().match(/^(approve|decline)(?:\s+#?(\d{4}))?[.!]?$/i);
+        if (isParent(who) && said) {
+          const { action: pending, ask } = pickPending(await pendingFor(who, thread), said[2]);
+          if (!pending) return void (await sendGroup(thread, ask!));
+          const a = await decideAction(pending.id, /^approve/i.test(said[1]) ? "approve" : "decline", who);
           const msg = a.status === "executed" ? `✅ ${a.title} — ${a.result}` : a.status === "declined" ? `Declined: ${a.title}` : `⚠️ ${a.title} failed: ${a.error}`;
           await sendGroup(thread, `${msg} (${name})`);
           return;
@@ -113,7 +114,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           const ask = await redis.get<PendingAsk>(askKey).catch(() => null);
           if (ask && ask.who === who && fresh(ask.at, ASK_WAIT_MS)) {
             await redis.del(askKey);
-            return void (await fileFromGroup(thread, who, ask.text, chatServiceSid, media, "sent just after"));
+            return void (await fileFromGroup(thread, who, ask.text, chatServiceSid, media));
           }
           // No words yet: give them a moment to arrive, then file it as is.
           const mine: PendingPhoto = { at: new Date().toISOString(), who, chatServiceSid, media };
@@ -129,7 +130,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const photo = await redis.get<PendingPhoto>(photoKey).catch(() => null);
         if (photo && photo.who === who && fresh(photo.at, PHOTO_WAIT_MS + 15_000)) {
           await redis.del(photoKey);
-          return void (await fileFromGroup(thread, who, text, photo.chatServiceSid, photo.media, "sent just before"));
+          return void (await fileFromGroup(thread, who, text, photo.chatServiceSid, photo.media));
         }
 
         // "File this" with the photo still on its way: give it a few seconds to land.
@@ -141,7 +142,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           if (!still || still.at !== ask.at) return; // the photo arrived and was filed with these words
         }
 
-        const { reply } = await withThread(() => converse(thread, who, "group", text, Date.now() + 200_000));
+        // Several texts in a row from one person: answer them once, together.
+        const whole = await coalesce(`group:${thread}:${who}`, text);
+        if (whole === null) return;
+        const { reply } = await withThread(() => converse(thread, who, "group", whole, Date.now() + 200_000));
         if (reply) await sendGroup(thread, reply);
       } catch (e) {
         console.error("group text failed", e);

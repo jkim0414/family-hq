@@ -20,6 +20,8 @@ export function profileContext(p?: HouseholdProfile | null, opts: { withIds?: bo
 }
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY
+// Haiku 4.5, not 5.5: on the same 10 real emails (2026-10-07), 5.5 dropped a flight's calendar events
+// and filed a gymnastics promo as three events. The prompts here are tuned to 4.5; it's pennies a day.
 const MODEL = process.env.CLASSIFY_MODEL || "claude-haiku-4-5";
 
 export interface Classification {
@@ -150,6 +152,7 @@ RULES:
 - Default to fyi unless there is a real action or a real date.
 - NEWSLETTERS AND DIGESTS BURY REAL EVENTS. Read every paragraph of a teacher post, digest, or newsletter: any dated thing the kids take part in (a parade, performance, field trip, spirit or dress-up day, picture day, class party, early dismissal) is an event to file even when the rest of the post is chit-chat, and even when details are "still being finalized" — file it all-day with what's known (never invent a time the message doesn't give), put the dress/bring rules in "prep", and note that details are to come. A message that announces such an event is category "calendar", not "fyi".
 - SCHOOL FUNDRAISER DINE-OUT NIGHTS (restaurant giveback or spirit nights) are events the family wants on the calendar: file each with the restaurant name, address (from the flyer if attached), and hours, and put how the donation counts (show the flyer, promo code, order online) in "prep".
+- MULTI-DAY: a date range (Spring Break Mar 22–26, a camp week, a trip, a visit) is ONE all-day event with date = the first day and endDate = the last day (inclusive) — not just the first day, and not one event per day. (If each day has its own times, as in a camp with daily hours, still one span; put the daily hours in prep.)
 - Extract events with concrete dates only; resolve relative dates ("this Friday", "tomorrow") against the item's received date (provided). Output YYYY-MM-DD.
 - FLIGHTS: model a flight as ONE timed event spanning departure→arrival. date + start = the DEPARTURE date/time; end = the ARRIVAL time; endDate = the arrival date ONLY if it lands on a different day (red-eye). Set startTz to the DEPARTURE airport's IANA zone and endTz to the ARRIVAL airport's IANA zone (e.g. LAX → "America/Los_Angeles", EWR/JFK → "America/New_York", ORD → "America/Chicago", DEN → "America/Denver", SEA → "America/Los_Angeles"). Put the flight number in the title or location. This makes the calendar show true block time across zones. A round-trip itinerary = TWO separate flight events (outbound + return). Example: "UA 100 ORD 9:15 AM → BOS 12:40 PM, Jun 19" → {date:"2026-06-19", start:"09:15", end:"12:40", startTz:"America/Chicago", endTz:"America/New_York", title:"Depart for Boston — UA 100", location:"ORD → BOS"}.
 - For any non-flight event whose stated times are in a timezone other than Pacific, set startTz (and endTz if different) accordingly; otherwise omit them (defaults to Pacific).
@@ -201,7 +204,7 @@ const TOOL: Anthropic.Tool = {
             end: { type: "string", description: "HH:mm local to endTz, optional. For a flight, the arrival time." },
             endDate: {
               type: "string",
-              description: "YYYY-MM-DD — only if the end falls on a DIFFERENT day than date (e.g. a red-eye that lands the next morning). Omit if same day.",
+              description: "YYYY-MM-DD — the LAST day when the event spans days: a break, camp week, or trip (Spring Break Mar 22–26 → date 03-22, endDate 03-26, inclusive), or a red-eye's arrival date. Omit if it's one day.",
             },
             startTz: {
               type: "string",
@@ -371,7 +374,8 @@ ${input.text}${note}`,
     model,
     // Generous output budget: a full season schedule can be dozens of events.
     max_tokens: 8192,
-    system: [{ type: "text", text: SYSTEM, cache_control: { type: "ephemeral" } }],
+    // Not cached: emails arrive minutes apart, so a cached copy was written every time and never read.
+    system: SYSTEM,
     tools: [TOOL],
     tool_choice: { type: "tool", name: "file_item" },
     messages: [{ role: "user", content }],

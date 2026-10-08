@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getCollection, setCollection, type AppState } from "../_lib/db.js";
+import { getCollection, setCollection, type AppState, removeItems } from "../_lib/db.js";
 import { json } from "../_lib/http.js";
 import { canSee, PARENTS } from "../_lib/privacy.js";
 import { requireUser } from "../_lib/auth.js";
@@ -42,14 +42,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (collection === "events" && target?.gcalId) {
         await deleteCalendarEvent(target.gcalId).catch(() => {});
       }
-      await setCollection(collection, list.filter((x) => x.id !== id) as any);
+      await removeItems(collection, [id]);
       return json(res, 200, { ok: true });
     }
 
     if (op === "upsert") {
       const item = { ...body.item };
+      // Fields the server owns: which Google Calendar event it is, where it came from.
+      for (const k of ["gcalId", "commId", "source", "travelMin", "travelFrom"]) delete item[k];
       if (!item.id) item.id = genId(collection.slice(0, 4));
       const prior = list.find((x) => x.id === item.id);
+      if (prior && (prior as { gcalId?: string }).gcalId) item.gcalId = (prior as { gcalId?: string }).gcalId;
       if (prior && !mine(prior)) return json(res, 404, { error: "not found" });
       if (item.privateTo && item.privateTo !== user.id) return json(res, 400, { error: "can only make items private to yourself" });
       if (item.audience && !(Array.isArray(item.audience) && item.audience.includes(user.id))) return json(res, 400, { error: "bad audience" });
@@ -75,6 +78,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     return json(res, 400, { error: "bad op" });
   } catch (err) {
-    return json(res, 500, { error: String(err) });
+    console.error("mutate failed", err);
+    return json(res, 500, { error: "Couldn't save that." });
   }
 }

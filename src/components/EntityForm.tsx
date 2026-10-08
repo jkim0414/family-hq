@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { KIDS, formatPhone } from "../store";
+import { formatPhone } from "../store";
+import { useData } from "../dataStore";
 import { PEOPLE } from "../data/people";
 import { Button } from "./ui";
 import { LoyaltyEditor } from "./LoyaltyEditor";
@@ -196,6 +197,7 @@ function FieldInput({
   onChange: (v: any) => void;
 }) {
   const [guest, setGuest] = useState("");
+  const { data } = useData();
   const cls = `w-full rounded-xl border bg-fill px-3 py-2.5 text-sm text-ink focus:outline-none ${
     invalid ? "border-danger focus:border-danger" : "border-line focus:border-accent"
   }`;
@@ -305,7 +307,7 @@ function FieldInput({
     case "kids":
       return (
         <div className="flex flex-wrap gap-2">
-          {KIDS.map((k) => {
+          {data.kids.map((k) => {
             const arr: KidId[] = value || [];
             const on = arr.includes(k.id);
             return (

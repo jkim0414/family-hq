@@ -1,5 +1,18 @@
 import { randomBytes } from "node:crypto";
-import { marked } from "marked";
+import { Marked } from "marked";
+
+// File bodies are model-written markdown (and the model reads emails and web pages): render it with
+// raw HTML shown as text, and only web/mail/phone links — no forms, redirects, or script URLs.
+const md = new Marked({
+  renderer: {
+    html({ text }) {
+      return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    },
+  },
+  walkTokens(token) {
+    if ((token.type === "link" || token.type === "image") && !/^(https?:|mailto:|tel:|\/|#)/i.test(token.href)) token.href = "#";
+  },
+});
 import { getFile, saveFile, addAudit } from "./db.js";
 import type { FileDoc, Member } from "../../src/data/types";
 
@@ -48,7 +61,9 @@ export async function setFilePublic(id: string, isPublic: boolean, by: string): 
   const doc = await getFile(id);
   if (!doc) return null;
   doc.public = isPublic;
-  if (isPublic && !doc.shareToken) doc.shareToken = randomBytes(12).toString("base64url");
+  // A fresh link each time it's shared: un-sharing really ends the old one.
+  if (isPublic) doc.shareToken = randomBytes(16).toString("base64url");
+  else delete doc.shareToken;
   await saveFile(doc);
   await addAudit({ kind: isPublic ? "file_shared" : "file_unshared", summary: `File: ${doc.title}`, by, ref: doc.id, privateTo: doc.privateTo, audience: doc.audience });
   return doc;
@@ -66,7 +81,7 @@ export function renderFile(doc: FileDoc, opts: { version?: number; token?: strin
   const versions = doc.versions || [];
   const old = opts.version && versions[opts.version - 1];
   const shown = old ? { ...doc, title: old.title, markdown: old.markdown, updatedAt: old.updatedAt } : doc;
-  const body = marked.parse(shown.markdown, { async: false }) as string;
+  const body = md.parse(shown.markdown, { async: false }) as string;
   const day = (iso: string) => new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   const link = (v?: number) => `/f/${doc.id}?${[v ? `v=${v}` : "", opts.token ? `t=${encodeURIComponent(opts.token)}` : ""].filter(Boolean).join("&")}`;
   const history = versions.length

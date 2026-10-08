@@ -16,7 +16,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const shot = await actionScreenshot(a);
     if (!shot) return json(res, 404, { error: "no screenshot" });
     res.setHeader("content-type", "image/jpeg");
-    res.setHeader("cache-control", "private, max-age=86400, immutable");
+    // Not kept in the browser's cache: it can show a checkout page, and the phone may be shared.
+    res.setHeader("cache-control", "no-store");
     return res.status(200).send(Buffer.from(shot, "base64"));
   }
   if (req.method !== "POST") return json(res, 405, { error: "POST only" });

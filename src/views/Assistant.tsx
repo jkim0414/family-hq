@@ -184,6 +184,8 @@ function GmailConnection() {
 function WorkCalendar({ who }: { who: "alex" | "sam" }) {
   const name = who === "alex" ? "Alex" : "Sam";
   const [st, setSt] = useState<{ connected: boolean; label?: string; next7days?: number; busyOnly?: boolean; error?: string } | null>(null);
+  // The family calendar's Google account (from the server: no addresses are built into the app).
+  const [shareWith, setShareWith] = useState("");
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
@@ -192,7 +194,11 @@ function WorkCalendar({ who }: { who: "alex" | "sam" }) {
   const load = async () => {
     try {
       const r = await fetch(`/api/workcal?t=${Date.now()}`, { cache: "no-store" });
-      if (r.ok) setSt((await r.json())[who]);
+      if (r.ok) {
+        const j = await r.json();
+        setSt(j[who]);
+        setShareWith(j.shareWith || "");
+      }
     } catch {
       /* offline */
     }
@@ -246,7 +252,7 @@ function WorkCalendar({ who }: { who: "alex" | "sam" }) {
       {editing && (
         <div className="mt-3 space-y-2 rounded-xl bg-fill p-3 text-[13px] text-ink-2">
           <p>
-            <b>Google (Workspace):</b> in Google Calendar → Settings → your work calendar → <i>Share with specific people</i>, add <b>alex@example.com</b> with <i>See all event details</i>. Then enter the work email below.
+            <b>Google (Workspace):</b> in Google Calendar → Settings → your work calendar → <i>Share with specific people</i>, add <b>{shareWith || "the family calendar's Google account"}</b> with <i>See all event details</i>. Then enter the work email below.
           </p>
           <p>
             <b>Outlook / Microsoft 365:</b> Settings → Calendar → Shared calendars → <i>Publish a calendar</i> → <i>Can view all details</i> → copy the ICS link and paste it below.
@@ -255,7 +261,7 @@ function WorkCalendar({ who }: { who: "alex" | "sam" }) {
             <input
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              placeholder={who === "sam" ? "sam@work.example or https://…ics" : "work email or https://…ics"}
+              placeholder="work email or https://…ics"
               autoCapitalize="off"
               autoCorrect="off"
               className="min-w-0 flex-1 rounded-xl border border-line bg-surface px-3 py-2 text-sm focus:border-accent focus:outline-none"

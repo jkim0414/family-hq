@@ -1,5 +1,7 @@
 import ical from "node-ical";
 import { redis } from "./db.js";
+import { CONFIG } from "../../src/data/config.js";
+import { safeFetch } from "./links.js";
 import { getCal } from "./calendar.js";
 import { utcToWall, fmt12, HOME_TZ } from "../../src/data/tz.js";
 
@@ -34,7 +36,10 @@ export interface WorkBlock {
 
 const TRAVEL_RE = /\b(travel|commute|commuting|drive|driving|train|transit|to the office|to office)\b/i;
 // "UA 123 JFK to DEN", "travel/security", "flight to Denver", "airport".
-const TRIP_RE = /\b(flight|flights|airport|security|boarding|layover)\b|\b[A-Z]{3} ?(to|→|-|–) ?[A-Z]{3}\b/;
+const TRIP_RE = /\b(flight|flights|airport|security|boarding|layover)\b|\b[A-Z]{3} ?(to|→|-|–) ?[A-Z]{3}\b|\b(to|from)\s+[A-Z]{3}\b/;
+// Airport codes in a trip hold ("transportation to DEN", "LAX → JFK"): where the parent is going
+// (any but the home airports).
+const AIRPORT_RE = new RegExp(`\\b${CONFIG.homeAirports.map((a) => `(?!${a}\\b)`).join("")}[A-Z]{3}\\b`, "g");
 function classify(title: string, hold: boolean): Pick<WorkBlock, "hold" | "travel" | "trip"> {
   const trip = hold && (TRIP_RE.test(title) || /\bflight\b/i.test(title));
   return { hold, trip, travel: hold && !trip && TRAVEL_RE.test(title) };
@@ -102,7 +107,8 @@ async function readGoogle(id: string, from: Date, to: Date): Promise<WorkBlock[]
 }
 
 async function readIcs(url: string, from: Date, to: Date): Promise<WorkBlock[]> {
-  const r = await fetch(url, { headers: { "user-agent": "FamilyHQ/1.0" } });
+  const r = await safeFetch(url.replace(/^webcal:/i, "https:"), { headers: { "user-agent": "FamilyHQ/1.0" } });
+  if (!r) throw new Error("that calendar link isn't a public web address");
   if (!r.ok) throw new Error(`calendar link returned ${r.status}`);
   const data = ical.sync.parseICS(await r.text());
   const out: WorkBlock[] = [];
@@ -151,7 +157,10 @@ export async function getWorkBlocks(p: Parent, from: Date, to: Date): Promise<Wo
  */
 export function formatBlocks(blocks: WorkBlock[], opts: { availabilityOnly?: boolean } = {}): string {
   if (!blocks.length) return "(nothing on the work calendar)";
-  const label = (b: WorkBlock) => (b.outOfOffice ? "out of office" : b.trip ? "traveling" : b.travel ? "commute (office day)" : b.hold ? "blocked" : "busy");
+  // Availability-only still says enough to plan around: where a trip is to (the airport code — not
+  // a meeting name), and that the whole day is a travel day, so "blocked" holds around it read right.
+  const where = (b: WorkBlock) => [...new Set(b.title.match(AIRPORT_RE) || [])].slice(0, 2).join("/");
+  const label = (b: WorkBlock) => (b.outOfOffice ? "out of office" : b.trip ? `traveling${where(b) ? ` (${where(b)} trip)` : ""}` : b.travel ? "commute (office day)" : b.hold ? "blocked" : "busy");
   const byDay = new Map<string, string[]>();
   for (const b of blocks) {
     const s = utcToWall(new Date(b.start), HOME_TZ);
@@ -162,9 +171,10 @@ export function formatBlocks(blocks: WorkBlock[], opts: { availabilityOnly?: boo
     const line = b.allDay ? `all day — ${what}` : `${fmt12(s.time)}–${fmt12(e.time)} ${what}`;
     (byDay.get(day) || byDay.set(day, []).get(day)!).push(line);
   }
+  const tripDays = new Set(blocks.filter((b) => b.trip).map((b) => (b.allDay ? b.start.slice(0, 10) : utcToWall(new Date(b.start), HOME_TZ).date)));
   return [...byDay.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([d, lines]) => `${new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}: ${lines.join("; ")}`)
+    .map(([d, lines]) => `${new Date(d + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}${tripDays.has(d) ? " (TRAVEL DAY — away for part of it)" : ""}: ${lines.join("; ")}`)
     .join("\n");
 }
 

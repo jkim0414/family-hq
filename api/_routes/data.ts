@@ -18,7 +18,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("cache-control", "no-store");
   try {
     if (typeof req.query.comm === "string") {
-      const c = (await getCollection("comms")).find((x) => x.id === req.query.comm);
+      const c = (await getCollection("comms")).find((x) => x.id === req.query.comm && canSee(x, user.id));
       return json(res, 200, { raw: c?.raw || "" });
     }
     const v = await getStateVersion();
@@ -28,7 +28,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // household calendar, to-dos, kids, facts, and mail, but not spending or the activity log;
     // of approvals and schedules, only her own.
     const parent = isParent(user.id);
-    const mine = <T extends { privateTo?: Member }>(xs: T[]) => (xs || []).filter((x) => canSee(x, user.id));
+    const mine = <T extends { privateTo?: Member; audience?: Member[] }>(xs: T[]) => (xs || []).filter((x) => canSee(x, user.id));
     const ours = <T extends { privateTo?: Member; requester?: Member }>(xs: T[]) => (xs || []).filter((x) => canSeeArtifact(x, user.id));
     const slim = {
       ...state,
@@ -40,7 +40,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       suggestions: parent ? state.suggestions : [], // calendar/roster changes for a parent to confirm
       v,
       me: { id: user.id, name: user.name, role: user.role },
-      comms: state.comms.map(({ raw, ...c }) => ({ ...c, hasRaw: !!raw })),
+      comms: mine(state.comms).map(({ raw, ...c }) => ({ ...c, hasRaw: !!raw })),
+      profile: { ...state.profile, facts: mine(state.profile.facts) },
       actions: ours(state.actions).map((a) => {
         const p = a.payload as { screenshot?: string };
         if (!p?.screenshot) return a;

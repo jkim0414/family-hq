@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 for (const line of readFileSync(".env.local", "utf8").split("\n")) { const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/); if (m) process.env[m[1]] = m[2].trim(); }
 const db = await import("../api/_lib/db");
 const agent = await import("../api/_lib/agent");
-const { createSession, userById } = await import("../api/_lib/auth");
+const { createSession, userById, endSession } = await import("../api/_lib/auth");
 const { default: dataRoute } = await import("../api/_routes/data");
 const { getPrivateNotes } = await import("../api/_lib/privacy");
 let pass = 0, fail = 0;
@@ -28,7 +28,7 @@ async function dataAs(p: "alex" | "sam") {
   const req: any = { method: "GET", query: {}, headers: { cookie: `fhq_session=${sid}` } };
   const res: any = { statusCode: 200, setHeader() {}, status(c: number) { this.statusCode = c; return this; }, json(b: any) { body = b; return this; }, send(b: any) { body = b; return this; }, end() { return this; } };
   await dataRoute(req, res);
-  await db.redis.del(`session:${sid}`);
+  await endSession(sid);
   return typeof body === "string" ? JSON.parse(body) : body;
 }
 
@@ -72,6 +72,12 @@ try {
   const events = await db.getCollection("events");
   const bad = events.filter((e: any) => e.title.includes(MARK));
   if (bad.length) await db.setCollection("events", events.filter((e: any) => !e.title.includes(MARK)));
+  // A failed run can leak the test event onto the shared Google Calendar: take it off there too, and
+  // drop any calendar-sync history about it.
+  const { deleteCalendarEvent } = await import("../api/_lib/calendar");
+  for (const e of bad) if (e.gcalId) await deleteCalendarEvent(e.gcalId).catch(() => {});
+  const comms = await db.getCollection("comms");
+  if (comms.some((c: any) => JSON.stringify(c).includes(MARK))) await db.setCollection("comms", comms.filter((c: any) => !JSON.stringify(c).includes(MARK)));
   const todos = await db.getCollection("todos");
   const tBad = todos.filter((t: any) => t.title.includes(MARK) || (/wrapping paper/i.test(t.title) && Date.parse(t.id.split("-").pop() ? new Date().toISOString() : "") >= 0 && t.id.startsWith("todo-chat-")));
   const tKeep = todos.filter((t: any) => !(t.title.includes(MARK) || /wrapping paper/i.test(t.title)));

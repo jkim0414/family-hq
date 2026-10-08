@@ -3,10 +3,13 @@ import { appendItems, getCollection, getProfile } from "./db.js";
 import { createCalendarEvent, updateCalendarEvent } from "./calendar.js";
 import { eventsSimilar, commsDuplicate, mergeEventDetails, todosSimilar, adjustPrepDue } from "./util.js";
 import { CONFIG } from "../../src/data/config.js";
+import { canSee, onSharedCalendar } from "./privacy.js";
 import { KIDS } from "../../src/data/kids.js";
 
 const todayLocal = () => new Intl.DateTimeFormat("en-CA", { timeZone: CONFIG.calendar.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 import { applyMetadata } from "./metadata.js";
+import { trustedSender } from "./senders.js";
+import { esc } from "./http.js";
 import { sendEmail } from "./email.js";
 import type { RawMessage } from "./imap.js";
 import { extractLinks, fetchLinkedPages, fetchLinkedPdfs } from "./links.js";
@@ -60,11 +63,11 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   const stats: FileStats = { filed: 0, events: 0, updatedEvents: 0, todos: 0, alerts: 0, duplicates: 0, metaApplied: 0, metaSuggested: 0, processedKeys: [] };
   if (!messages.length) return stats;
 
-  // Private items (a parent's Just-me chat) are never matched, shown to the classifier, or updated by filing.
-  const existingEvents = (await getCollection("events")).filter((e) => !e.privateTo);
+  // Private and chat-kept items (a Just-me chat, a chat with Grandma) are never matched, shown to the classifier, or updated by filing.
+  const existingEvents = (await getCollection("events")).filter((e) => canSee(e, "family"));
   const existingComms = await getCollection("comms");
-  const existingTodos = (await getCollection("todos")).filter((t) => !t.privateTo);
-  const profileCtx = profileContext(await getProfile());
+  const existingTodos = (await getCollection("todos")).filter((t) => canSee(t, "family"));
+  const profileCtx = profileContext(await getProfile().then((p) => ({ ...p, facts: p.facts.filter((f) => canSee(f, "family")) })));
   const newComms: Comm[] = [];
   const newEvents: CalEvent[] = [];
   const updatedEvents: CalEvent[] = [];
@@ -212,7 +215,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
     if (c.category === "alert") alerts.push({ title: c.subject || m.subject, summary: c.summary });
 
     try {
-      const md = await applyMetadata(c.metadata, commId, m.date);
+      const md = await applyMetadata(c.metadata, commId, m.date, trustedSender(m.from));
       stats.metaApplied += md.applied;
       stats.metaSuggested += md.suggested;
     } catch (e) {
@@ -231,6 +234,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   }
   for (const evt of updatedEvents) {
     try {
+      if (!onSharedCalendar(evt)) continue;
       const gcalId = await updateCalendarEvent(evt);
       if (gcalId) evt.gcalId = gcalId;
     } catch (e) {
@@ -243,7 +247,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   if (newTodos.length) await appendItems("todos", newTodos);
 
   if (alerts.length && !opts.quiet) {
-    const html = `<h2>⚠️ Action needed</h2><ul>${alerts.map((a) => `<li><b>${a.title}</b><br>${a.summary}</li>`).join("")}</ul><p><a href="https://your-app.vercel.app">Open the hub →</a></p>`;
+    const html = `<h2>⚠️ Action needed</h2><ul>${alerts.map((a) => `<li><b>${esc(a.title)}</b><br>${esc(a.summary)}</li>`).join("")}</ul><p><a href="https://your-app.vercel.app">Open the hub →</a></p>`;
     await sendEmail(`⚠️ Family HQ: ${alerts.length} item${alerts.length > 1 ? "s" : ""} need attention`, html).catch((e) => console.error("alert email failed", e));
   }
 

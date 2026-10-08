@@ -20,7 +20,7 @@ const local = await chromium.launch({ args: [`--remote-debugging-port=${PORT}`] 
 
 const { newTask, runAgent } = await import("../api/_lib/agent");
 const { decideAction } = await import("../api/_lib/actions");
-const { getTask, saveTask, getCollection, setCollection, redis } = await import("../api/_lib/db");
+const { getTask, saveTask, getCollection, setCollection, removeItems, redis } = await import("../api/_lib/db");
 
 const id = `task-web-test-${Date.now().toString(36)}`;
 const task = newTask(id, "Demo pizza form (test)", "alex", "app");
@@ -58,7 +58,7 @@ if (pending && t.status === "waiting") {
 console.log(`\nRESULT: ${ok ? "PASS" : "FAIL"}`);
 
 // cleanup
-await setCollection("actions", (await getCollection("actions")).filter((a: any) => a.payload?.taskId !== id));
+await removeItems("actions", (await getCollection("actions")).filter((a: any) => a.payload?.taskId === id).map((a: any) => a.id));
 await setCollection("audit", (await getCollection("audit")).filter((e: any) => !(pending && e.ref === pending.id)));
 await redis.del(`task:${id}`);
 await redis.srem("tasks_index", id);

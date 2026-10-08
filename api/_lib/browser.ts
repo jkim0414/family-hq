@@ -51,9 +51,12 @@ async function bbCreate(timeout = 300, viewport?: { width: number; height: numbe
       // An abandoned session (killed function, forgotten task) bills until this
       // expires — keep it short. Login state lives in the persistent context.
       timeout,
-      browserSettings: { ...(contextId ? { context: { id: contextId, persist: true } } : {}), ...(viewport ? { viewport } : {}) },
+      // No session recording or logs: Kimi types card numbers, passwords, and one-time codes here
+      // (masking on screen doesn't keep them out of a DOM recording).
+      browserSettings: { ...(contextId ? { context: { id: contextId, persist: true } } : {}), ...(viewport ? { viewport } : {}), recordSession: false, logSession: false },
     }),
   });
+  if (r.status === 402) throw new Error("The hosted browser (Browserbase) is out of minutes on its plan — add minutes or upgrade at browserbase.com, then ask again. Nothing was done.");
   if (!r.ok) throw new Error(`Browserbase create ${r.status}: ${(await r.text()).slice(0, 200)}`);
   return (await r.json()) as { id: string; connectUrl: string };
 }
@@ -183,9 +186,59 @@ export async function pageText(page: Page): Promise<string> {
 }
 
 export async function elementText(page: Page, n: number): Promise<string> {
+  // A text field's value is never its label: it may hold a password or a card number Kimi filled.
   return (await page
-    .$eval(SEL(n), (e: any) => (e.innerText || e.value || e.getAttribute("aria-label") || e.getAttribute("title") || "").trim())
+    .$eval(SEL(n), (e: any) => {
+      const t = String(e.type || "").toLowerCase();
+      const isButton = e.tagName === "BUTTON" || (e.tagName === "INPUT" && /^(submit|button|reset|image)$/.test(t));
+      return (e.innerText || (isButton ? e.value : "") || e.getAttribute("aria-label") || e.getAttribute("title") || "").trim();
+    })
     .catch(() => "")) as string;
+}
+
+/**
+ * What pressing Enter would do: the label of the submit button of the form that element [n] (or
+ * the focused element) is in — so Enter in a checkout form counts as clicking "Place order".
+ */
+export async function enterTargetLabel(page: Page, n?: number): Promise<string> {
+  return (await page
+    .evaluate((sel) => {
+      const doc: any = (globalThis as any).document;
+      const el: any = sel ? doc.querySelector(sel) : doc.activeElement;
+      const form = el && (el.form || (el.closest && el.closest("form")));
+      if (!form) return "";
+      const btn: any = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+      return btn ? String(btn.innerText || btn.value || btn.getAttribute("aria-label") || "").trim() : "(form)";
+    }, typeof n === "number" ? SEL(n) : "")
+    .catch(() => "")) as string;
+}
+
+/** The label of the focused element (what Space would press). */
+export async function focusedLabel(page: Page): Promise<string> {
+  return (await page
+    .evaluate(() => {
+      const a: any = (globalThis as any).document.activeElement;
+      return a ? String(a.innerText || (/^(submit|button)$/i.test(a.type || "") ? a.value : "") || a.getAttribute("aria-label") || "").trim() : "";
+    })
+    .catch(() => "")) as string;
+}
+
+/** The host of the page, without "www.". */
+export function hostOfPage(page: Page): string {
+  try {
+    return new URL(page.url()).host.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/** Click the first visible element whose text matches — for toggles and custom widgets browse_read doesn't number. Returns what it clicked. */
+export async function clickText(page: Page, text: string, nth = 0): Promise<string> {
+  const loc = page.getByText(text, { exact: false }).nth(nth);
+  const label = ((await loc.innerText({ timeout: 5000 }).catch(() => "")) || text).trim().slice(0, 80);
+  await loc.click({ timeout: 10000 });
+  await settle(page);
+  return label;
 }
 
 export async function goto(page: Page, url: string): Promise<void> {
@@ -208,11 +261,15 @@ export async function type(page: Page, n: number, text: string, pressEnter = fal
 
 /** Type a vault secret into [n] and hide it from later reads and screenshots. */
 export async function typeSecret(page: Page, n: number, text: string): Promise<void> {
-  await page.fill(SEL(n), text, { timeout: 10000 });
+  // Masked before it's filled, so a failed fill never leaves the value readable on the page; and a
+  // failure reports nothing about the value (Playwright errors can echo what was typed).
   await page.$eval(SEL(n), (e: any) => {
     e.setAttribute("data-hq-secret", "1");
     e.style.setProperty("-webkit-text-security", "disc");
   }).catch(() => {});
+  await page.fill(SEL(n), text, { timeout: 10000 }).catch(() => {
+    throw new Error(`couldn't fill [${n}] — is it a text field? browse_read to check`);
+  });
 }
 
 
@@ -323,15 +380,16 @@ export async function fillCard(page: Page, card: CardFill): Promise<string[]> {
     const name = await firstVisible(frame, CARD_FIELDS.name);
     if (!num && !exp && !cvc && !month) continue;
     if (num && !filled.includes("number")) {
-      await typeInto(num, card.number);
       await mask(num);
+      await typeInto(num, card.number).catch(() => { throw new Error("couldn't type into the card number field"); });
       filled.push("number");
     }
     if (exp && !filled.includes("expiry")) {
       const ph = ((await exp.getAttribute("placeholder").catch(() => "")) || "").toUpperCase();
       const max = Number((await exp.getAttribute("maxlength").catch(() => "")) || 0);
       const value = ph.includes("YYYY") || max >= 7 ? `${mm}/${card.expYear}` : ph.includes("/") || max === 5 ? `${mm}/${yy}` : `${mm}${yy}`;
-      await typeInto(exp, value);
+      await mask(exp);
+      await typeInto(exp, value).catch(() => { throw new Error("couldn't type into the expiry field"); });
       filled.push("expiry");
     }
     if (month && !filled.includes("expiry")) {
@@ -349,8 +407,8 @@ export async function fillCard(page: Page, card: CardFill): Promise<string[]> {
       filled.push("expiry");
     }
     if (cvc && !filled.includes("security code")) {
-      await typeInto(cvc, card.cvc);
       await mask(cvc);
+      await typeInto(cvc, card.cvc).catch(() => { throw new Error("couldn't type into the security code field"); });
       filled.push("security code");
     }
     if (name && card.name && !filled.includes("name")) {

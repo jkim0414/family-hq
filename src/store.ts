@@ -1,13 +1,11 @@
-import { KIDS, kidById } from "./data/kids";
-import { CONTACTS, PLACES, ROUTINES } from "./data/meta";
 import { isTodoUrgent as isTodoUrgentOn, URGENT_DAYS } from "./data/digest";
 import { toHomeZone, eventEndUtc, fmt12, homeSortKey } from "./data/tz";
 export { homeSortKey };
 import type { KidId } from "./data/types";
 
-// Roster + meta are stable; re-exported for convenience. Dynamic collections
-// (comms / events / todos) come from the live data store via useData().
-export { KIDS, kidById, CONTACTS, PLACES, ROUTINES };
+// The kids, places, contacts, and routines come from /api/data after sign-in (useData()), never
+// from source files: everything in the app bundle is public (build-checks/bundle-pii.ts enforces it).
+import { personColor } from "./data/people";
 
 // ── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -116,7 +114,7 @@ export function isTodoUrgent(t: { due?: string; done?: boolean; priority?: strin
   return isTodoUrgentOn(t, todayISO());
 }
 
-export const kidColor = (id: KidId) => kidById(id)?.color || "#64748b";
+export const kidColor = (id: KidId) => personColor(id);
 
 /** Normalize a phone number to a clean display format; leaves intl/other as-is. */
 export function formatPhone(raw?: string): string {

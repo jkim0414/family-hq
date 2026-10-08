@@ -14,7 +14,7 @@ for (const k of ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "IMAP_USER", "IMAP_PAS
 const a = await import("../api/_lib/agent");
 const db = await import("../api/_lib/db");
 const web = await import("../api/_lib/browser");
-const { createSession, userById } = await import("../api/_lib/auth");
+const { createSession, userById, endSession } = await import("../api/_lib/auth");
 const route = (await import("../api/_routes/takeover")).default;
 
 let pass = 0, fail = 0;
@@ -70,7 +70,7 @@ try {
   await web.releaseSession(sessionId || t?.takeover?.sessionId || t?.browserSessionId).catch(() => {});
   if (t?.takeover) await db.redis.del(`takeover:${t.takeover.token}`);
   for (const x of [id, parent]) { await db.redis.del(`task:${x}`, `task_thread:${x}`, `reactions:${x}`); await db.redis.srem("tasks_index", x); await db.redis.srem("tasks_active", x); }
-  await db.redis.del(`session:${alex}`, `session:${sam}`);
+  await endSession(alex); await endSession(sam);
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 }

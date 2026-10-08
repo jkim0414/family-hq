@@ -69,7 +69,9 @@ approval, running scheduled tasks, leave-by alerts. A timer calls her every minu
 Vercel's built-in cron only runs daily on the Hobby plan, so use a free external one:
 
 1. At [cron-job.org](https://cron-job.org) (free), create a job that calls
-   `https://<your-app>/api/ingest?secret=<CRON_SECRET>` **every minute**.
+   `https://<your-app>/api/ingest` **every minute**, with a request header
+   `Authorization: Bearer <CRON_SECRET>` (Advanced → Headers). Not `?secret=` in the URL: it isn't
+   accepted, since URLs end up in logs.
 2. Within a minute, **Kimi tab → Setup** shows the heartbeat as running.
 
 Without it, the app works when you chat with her, but nothing happens on its own.
@@ -87,8 +89,9 @@ Kimi writes events to one Google Calendar and invites the other parent.
 3. Create an **OAuth client ID** (Web application) with the redirect URI
    `<APP_URL>/api/oauth/callback`.
 4. Set **`GOOGLE_CLIENT_ID`** and **`GOOGLE_CLIENT_SECRET`**, and redeploy.
-5. Open `<APP_URL>/api/oauth/start?secret=<CRON_SECRET>` once, signed in to the Google account
-   that owns the family calendar. The connection is saved.
+5. Signed in to the app as a parent, open `<APP_URL>/api/oauth/start?for=calendar` once and
+   choose the Google account that owns the family calendar. The connection is saved (encrypted
+   when `VAULT_KEY` is set).
 6. In `src/data/config.ts`, set `calendar.targetCalendarId` (the calendar to write to, usually
    that account's address) and `calendar.alwaysInvite`.
 

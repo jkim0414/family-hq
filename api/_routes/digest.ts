@@ -1,5 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { authorized, json } from "../_lib/http.js";
+import { authorized, json, esc } from "../_lib/http.js";
+import { canSee } from "../_lib/privacy.js";
+import { CONFIG } from "../../src/data/config.js";
 import { getCollection } from "../_lib/db.js";
 import { sendEmail } from "../_lib/email.js";
 import { selectForDigest, isTodoUrgent } from "../../src/data/digest.js";
@@ -40,17 +42,17 @@ function relDay(iso: string, today: string): string {
   });
 }
 
-// GET /api/digest?mode=daily|weekly&secret=...
+// GET /api/digest?mode=daily|weekly (Bearer CRON_SECRET)
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
   const mode = req.query.mode === "weekly" ? "weekly" : "daily";
   const dryRun = req.query.dry === "1";
 
   try {
-    // The digest goes to both parents, so private items never appear in it.
+    // The digest goes to both parents: only what both may see (nothing private, nothing kept in a chat).
     const [allEvents, allTodos] = await Promise.all([
-      getCollection("events").then((xs) => xs.filter((x) => !x.privateTo)),
-      getCollection("todos").then((xs) => xs.filter((x) => !x.privateTo)),
+      getCollection("events").then((xs) => xs.filter((x) => canSee(x, "family"))),
+      getCollection("todos").then((xs) => xs.filter((x) => canSee(x, "family"))),
     ]);
     const today = todayPT();
     await ensureSeasonalSuggestions(new Date().toISOString()).catch(() => {});
@@ -60,7 +62,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const parts: string[] = [];
       if (f.length) parts.push(f.join(" & "));
       if (o.length) parts.push(`resp ${o.join(" & ")}`);
-      return parts.length ? ` (${parts.join(" · ")})` : "";
+      return parts.length ? ` (${esc(parts.join(" · "))})` : "";
     };
 
     const { events: upcoming, todos: open, prep } = selectForDigest(allEvents, allTodos, today, mode);
@@ -96,8 +98,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const name = p === "alex" ? "Alex" : "Sam";
         workLines.push(
           mode === "daily"
-            ? `<b>${name}</b>: ${parts[0].s}`
-            : `<b>${name}</b>: ${parts.map((x) => `${relDay(x.d, today)} — ${x.s}`).join("; ")}`
+            ? `<b>${name}</b>: ${esc(parts[0].s)}`
+            : `<b>${name}</b>: ${esc(parts.map((x) => `${relDay(x.d, today)} — ${x.s}`).join("; "))}`
         );
       } catch (e) {
         console.error("digest work calendar", p, e);
@@ -118,7 +120,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const html = `<div style="font-family:system-ui,sans-serif;max-width:560px">
 <h2 style="margin:0 0 4px">${heading}</h2>
-${todayWx ? `<p style="margin:4px 0 0;color:#555">🌤 Today's weather: ${todayWx}</p>` : ""}
+${todayWx ? `<p style="margin:4px 0 0;color:#555">🌤 Today's weather: ${esc(todayWx)}</p>` : ""}
 ${workLines.length ? section("💼 Work", workLines) : ""}
 ${section(
   "📅 Events",
@@ -126,34 +128,38 @@ ${section(
     // Display in the home zone (PT); the stored time is source-zone wall time.
     const t = toHomeZone(e);
     const span = e.allDay && e.endDate && e.endDate !== e.date ? ` through ${relDay(e.endDate, today)}` : "";
-    return `<b>${e.title}</b>${who(e)} — ${relDay(t.date, today)}${span}${
+    return `<b>${esc(e.title)}</b>${who(e)} — ${relDay(t.date, today)}${span}${
       t.start ? ` ${fmt12(t.start)} PT` : ""
-    }${e.location ? ` · ${e.location}` : ""}${notes.get(e.id) ? `<br><span style="color:#555">${notes.get(e.id)}</span>` : ""}`;
+    }${e.location ? ` · ${esc(e.location)}` : ""}${notes.get(e.id) ? `<br><span style="color:#555">${esc(notes.get(e.id)!)}</span>` : ""}`;
   })
 )}
 ${section(
   "✅ Needs action",
   open.map(
     (t) =>
-      `${isTodoUrgent(t, today) ? "❗ " : ""}<b>${t.title}</b>${who(t)}${
+      `${isTodoUrgent(t, today) ? "❗ " : ""}<b>${esc(t.title)}</b>${who(t)}${
         t.due ? " — " + relDay(t.due, today) : ""
       }`
   )
 )}
-${prep.length ? section("📝 Notes", prep.map((e) => `${relDay(toHomeZone(e).date, today)} · <b>${e.title}</b>: ${e.prep}`)) : ""}
+${prep.length ? section("📝 Notes", prep.map((e) => `${relDay(toHomeZone(e).date, today)} · <b>${esc(e.title)}</b>: ${esc(e.prep || "")}`)) : ""}
 <p style="margin-top:20px"><a href="https://your-app.vercel.app">Open the hub →</a></p>
 </div>`;
 
     if (dryRun) {
-      res.setHeader("content-type", "text/html");
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.setHeader("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'");
+      res.setHeader("cache-control", "no-store");
       return res.status(200).send(html);
     }
 
-    const toOverride = typeof req.query.to === "string" ? [req.query.to] : undefined;
+    // A test send goes only to someone in the household.
+    const household = [CONFIG.parents.alex.email, CONFIG.parents.sam.email].map((x) => x.toLowerCase());
+    const toOverride = typeof req.query.to === "string" && household.includes(req.query.to.toLowerCase()) ? [req.query.to] : undefined;
     await sendEmail(heading, html, { to: toOverride });
     json(res, 200, { ok: true, mode, events: upcoming.length, todos: open.length, to: toOverride });
   } catch (err) {
     console.error(err);
-    json(res, 500, { error: String(err) });
+    json(res, 500, { error: "digest failed" });
   }
 }

@@ -1,6 +1,8 @@
 import { google } from "googleapis";
 import { redis } from "./db.js";
-import type { MailHit } from "./imap.js";
+import { seal, unseal, type Sealed } from "./vault.js";
+import { messageOf, type MailHit, type MailMessage } from "./imap.js";
+import { simpleParser } from "mailparser";
 
 // Each parent's own Gmail, connected via Google sign-in (read-only scope). The
 // refresh token is stored per parent; nothing is stored about the mail itself.
@@ -16,8 +18,13 @@ export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "
 
 const key = (userId: string) => `gmail_token:${userId}`;
 
+// The refresh token is stored encrypted (VAULT_KEY); older plaintext ones still read.
+type StoredConn = Omit<GmailConn, "refreshToken"> & { refreshToken: Sealed };
+
 export async function getGmailConn(userId: string): Promise<GmailConn | null> {
-  return (await redis.get<GmailConn>(key(userId))) ?? null;
+  const c = await redis.get<StoredConn>(key(userId));
+  const refreshToken = c ? unseal(c.refreshToken) : null;
+  return c && refreshToken ? { ...c, refreshToken } : null;
 }
 
 export async function gmailConnected(userId: string): Promise<boolean> {
@@ -25,7 +32,7 @@ export async function gmailConnected(userId: string): Promise<boolean> {
 }
 
 export async function saveGmailConn(userId: string, conn: GmailConn): Promise<void> {
-  await redis.set(key(userId), conn);
+  await redis.set(key(userId), { ...conn, refreshToken: seal(conn.refreshToken) } satisfies StoredConn);
 }
 
 export async function disconnectGmail(userId: string): Promise<void> {
@@ -47,13 +54,13 @@ const header = (headers: { name?: string | null; value?: string | null }[] | und
   headers?.find((h) => (h.name || "").toLowerCase() === name.toLowerCase())?.value || "";
 
 /** Newest-first matches in the parent's inbox; Gmail search syntax works in `query`. */
-export async function searchGmail(userId: string, opts: { query?: string; days?: number; limit?: number }): Promise<MailHit[]> {
+export async function searchGmail(userId: string, opts: { query?: string; days?: number; limit?: number; exclude?: string }): Promise<MailHit[]> {
   const conn = await getGmailConn(userId);
   if (!conn) throw new Error(`${userId}'s Gmail isn't connected`);
   const days = Math.min(Math.max(opts.days || 30, 1), 365);
   const limit = Math.min(Math.max(opts.limit || 25, 1), 60);
   const gmail = client(conn);
-  const q = [`newer_than:${days}d`, "-in:spam", "-in:trash", opts.query?.trim() || ""].filter(Boolean).join(" ");
+  const q = [`newer_than:${days}d`, "-in:spam", "-in:trash", opts.query?.trim() ? `(${opts.query.trim()})` : "", opts.exclude || ""].filter(Boolean).join(" ");
   const list = await gmail.users.messages.list({ userId: "me", q, maxResults: limit });
   const ids = (list.data.messages || []).map((m) => m.id!).filter(Boolean);
   const msgs = await Promise.all(
@@ -75,7 +82,19 @@ export async function searchGmail(userId: string, opts: { query?: string; days?:
         subject: header(h, "Subject") || "(no subject)",
         snippet: (m.snippet || "").trim(),
         account: userId as MailHit["account"],
+        id: `gmail:${userId}:${m.id}`,
       };
     })
     .sort((a, b) => b.date.localeCompare(a.date));
 }
+
+/** One Gmail message in full (Gmail API path), for read_email. */
+export async function readGmail(userId: string, id: string): Promise<MailMessage | null> {
+  const conn = await getGmailConn(userId);
+  if (!conn) throw new Error(`${userId}'s Gmail isn't connected`);
+  const r = await client(conn).users.messages.get({ userId: "me", id, format: "raw" }).catch(() => null);
+  const raw = r?.data.raw;
+  if (!raw) return null;
+  return messageOf(await simpleParser(Buffer.from(raw, "base64url")));
+}
+

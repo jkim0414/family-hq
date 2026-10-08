@@ -1,6 +1,7 @@
 import { recordUsage } from "./usage.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { redis } from "./db.js";
+import { KNOWN_SENDERS, senderAddress } from "./senders.js";
 import { fetchRecent, inboxConfigured, type RecentMessage } from "./imap.js";
 import { fileMessages, type FileInput } from "./file-mail.js";
 import { recordReceipts } from "./receipts.js";
@@ -28,20 +29,7 @@ const SEEN_TTL_S = 6 * 86400;
 const MIN_INTERVAL_MS = 15 * 60 * 1000;
 const TRIAGE_MODEL = process.env.TRIAGE_MODEL || "claude-haiku-4-5";
 
-// Senders that are always household-relevant. Add here as misses show up in History.
-const KNOWN_SENDERS: RegExp[] = [
-  // Add your school district's and schools' email domains here, e.g. /yourdistrict\.org/i,
-  /brightwheel/i,
-  /band\.us/i,
-  /parentsquare/i,
-  /leagueapps/i,
-  /teamsnap/i,
-  /ayso/i,
-  /signupgenius/i,
-  // Add your pediatrician's / health system's email domain here if you want it filed.
-  /activecommunities|activenet/i,
-  /dentist|pediatric|orthodont/i,
-];
+// Senders that are always household-relevant: KNOWN_SENDERS in senders.ts.
 // Relevant only when the subject says so — these senders also send marketing and account noise.
 const CONDITIONAL_SENDERS: { from: RegExp; subject: RegExp }[] = [
   { from: /paperlesspost|evite|punchbowl|partiful/i, subject: /invit|rsvp|party|birthday|celebrat/i },
@@ -108,7 +96,9 @@ function ignorable(m: RecentMessage): boolean {
 }
 
 function directlyRelevant(m: RecentMessage, kids: RegExp): boolean {
-  return KNOWN_SENDERS.some((re) => re.test(m.from)) || CONDITIONAL_SENDERS.some((c) => c.from.test(m.from) && c.subject.test(m.subject)) || kids.test(m.subject);
+  // By the address, not the display name ("myschool.org" <anyone@anywhere> isn't the school).
+  const addr = senderAddress(m.from);
+  return KNOWN_SENDERS.some((re) => re.test(addr)) || CONDITIONAL_SENDERS.some((c) => c.from.test(addr) && c.subject.test(m.subject)) || kids.test(m.subject);
 }
 
 /** Headers + a short excerpt → which of these are about the household? (indices) */

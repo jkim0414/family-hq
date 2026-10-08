@@ -23,7 +23,9 @@ Theo, and Ava) is fictional.
   of), duplicates from several sources file once, and party invitations get a consistent
   checklist.
 - **Answers and acts in chat.** One conversation shared by both parents, in the app or by
-  SMS. Ask about the schedule, hand off a task, send a photo or PDF to file it.
+  SMS. Ask about the schedule, hand off a task, or send a photo or PDF: Kimi reads it with
+  your words and files it, or uses it for what you asked ("find flights that fit these"). She
+  opens emails in full when a search snippet isn't enough.
 - **Private "Just me" threads.** Each parent also has a private thread with Kimi, which is
   where their one-on-one texts land. Anything filed there can be fully private (a surprise,
   a gift idea, a purchase) and is then visible only to that parent: never in the family chat,
@@ -70,6 +72,22 @@ Theo, and Ava) is fictional.
   events, and "leave by" times with a push before it's time to go.
 - **Speaks as herself.** Kimi sends from her own address and number; she never writes to
   people as a parent.
+- **Treats what she reads as information, not orders.** Emails, web pages, invites, and search
+  results reach her marked as untrusted. A scheduled run can't add household facts or new
+  recurring tasks. A saved login fills only on its own site, and passport numbers only on
+  airline and government sites. Pressing Enter can't submit a checkout without approval.
+  Calendar invites from strangers aren't pulled in until someone accepts them, and an email
+  changes a contact or pickup routine on its own only if it comes from a known school address.
+- **Private by construction.** Facts, filed messages, approvals, and files stay with the chat
+  they came from (a caregiver never sees the parents' chat or their money mail). Approvals by
+  text name the item (`APPROVE 4821`) when several are waiting, and "ok thanks" never approves
+  anything. Sign-in codes are rate-limited, sessions are stored hashed, and Google tokens are
+  encrypted at rest. The app bundle is public, so it carries no family details: the roster comes
+  from the API after sign-in, and `build-checks/bundle-pii.ts` fails the build if anything from
+  `config.ts`, `kids.ts`, or `meta.ts` ships. `scripts/safety-check.ts` checks all of this.
+- **Writes that don't collide.** Each collection is a Redis hash with one field per item, so the
+  email check, chat, texts, and background jobs running at the same moment never overwrite each
+  other's changes (`scripts/collections-check.ts`).
 
 ## The app
 
@@ -103,13 +121,15 @@ Login is a 6-digit emailed code, parents only.
 
 ## Make it yours
 
-1. **Your family.** Edit `src/data/config.ts` (parents, emails, calendar), `src/data/people.ts`
+1. **Your family.** Edit `src/data/config.ts` (parents, emails, calendar, home airports, and
+   `bundleTerms`, strings that must never ship in the app), `src/data/people.ts`
    (who's who, colors), `src/data/kids.ts` and `src/data/meta.ts` (seed roster and directory),
    and the family block at the top of the classifier prompt in `api/_lib/classify.ts`. The
    parent ids (`alex`, `sam`) and kid ids appear throughout the code — rename them with a
    project-wide find-and-replace if you like.
 2. **Your inboxes.** Add your school district's and activities' email domains to
-   `KNOWN_SENDERS` in `api/_lib/watch.ts`.
+   `KNOWN_SENDERS` and `TRUSTED_DOMAINS` in `api/_lib/senders.ts` (trusted domains can update
+   contacts and routines without a parent confirming).
 3. **Your URL.** Replace `https://your-app.vercel.app` across the repo with your deployment's
    URL (and set `APP_URL`).
 4. **Your house rules.** Prep conventions live in `api/_lib/conventions.ts`; standing facts

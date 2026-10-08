@@ -10,7 +10,7 @@ const realEmail = CONFIG.caregivers.grandma.email;
 if (!realEmail) (CONFIG.caregivers.grandma as { email: string }).email = "grandma-check@example.invalid"; // sign-in for this test only
 const db = await import("../api/_lib/db");
 const { memberName } = await import("../api/_lib/privacy");
-const { createSession, userById } = await import("../api/_lib/auth");
+const { createSession, userById, endSession } = await import("../api/_lib/auth");
 const { proposeAction, latestPending } = await import("../api/_lib/actions");
 const { getWorkBlocks, formatBlocks, getWorkCalConfig } = await import("../api/_lib/workcal");
 const routes = {
@@ -95,7 +95,7 @@ try {
   check("Sam can't post to the Alex & Grandma chat", sp === 403, `HTTP ${sp}`);
   const sr = (await call("tasks", sam, { query: { id: PAIR } })).body;
   check("Sam can't read the Alex & Grandma chat", !sr?.task);
-  await db.redis.del(`session:${sam}`);
+  await endSession(sam);
 
   // 4c) A file scoped to the Alex & Grandma chat: both of them see it, Sam doesn't.
   const fid = `file-caregiver-check-${Date.now()}`;
@@ -104,7 +104,7 @@ try {
     const seen = async (sid: string) => ((await call("files", sid)).body.files as any[]).some((f) => f.id === fid);
     const other = await createSession(userById("sam")!);
     check("shared-chat file: Alex and Grandma see it, Sam doesn't", (await seen(alex)) && (await seen(grandma)) && !(await seen(other)));
-    await db.redis.del(`session:${other}`);
+    await endSession(other);
   } finally {
     await db.redis.del(`file:${fid}`);
     await db.redis.srem("files_index", fid);
@@ -144,11 +144,11 @@ try {
   fail++;
   console.error("✗ check crashed:", e);
 } finally {
-  if (actionId) await db.setCollection("actions", (await db.getCollection("actions")).filter((x) => x.id !== actionId));
+  if (actionId) await db.removeItems("actions", [actionId]);
   const audit = await db.getCollection("audit");
   await db.setCollection("audit", audit.filter((x) => !String(x.summary).includes("(caregiver-check)")));
   for (const t of created) { await db.redis.del(`task:${t}`, `task_thread:${t}`, `reactions:${t}`); await db.redis.srem("tasks_active", t); await db.redis.srem("tasks_index", t); }
-  await db.redis.del(`session:${grandma}`, `session:${alex}`);
+  await endSession(grandma); await endSession(alex);
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 }

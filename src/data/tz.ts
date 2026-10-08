@@ -1,5 +1,5 @@
 // NOTE: .js extension required — imported from api/ (Vercel Node ESM).
-import { CONFIG } from "./config.js";
+// No imports of config.ts here: this file ships in the app, and config holds the family's details.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Timezone policy: events are STORED in their source zone (whatever the email,
@@ -8,7 +8,7 @@ import { CONFIG } from "./config.js";
 // views and the emailed digest so they can't diverge.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const HOME_TZ = CONFIG.calendar.timeZone; // "America/Los_Angeles"
+export const HOME_TZ = "America/Los_Angeles"; // the family's home zone (config.calendar.timeZone uses this)
 
 // Intl.DateTimeFormat construction is the expensive part of every conversion
 // (~0.5ms each); one formatter per zone, reused, makes this effectively free.

@@ -21,7 +21,7 @@ export interface RawMessage {
 }
 
 /** Plain text of a message (HTML-only mail is converted), plus its links. */
-function bodyOf(parsed: { text?: string; html?: string | false }): { text: string; links: Link[] } {
+export function bodyOf(parsed: { text?: string; html?: string | false }): { text: string; links: Link[] } {
   const html = typeof parsed.html === "string" ? parsed.html : "";
   const text = (parsed.text || (html ? htmlToText(html.replace(/<style[\s\S]*?<\/style>/gi, " ")) : "")).trim().slice(0, 8000);
   return { text, links: extractLinks(parsed.text || "", html) };
@@ -98,6 +98,19 @@ export interface MailHit {
   subject: string;
   snippet: string;
   account: "school" | "personal" | "alex" | "sam";
+  /** For read_email: "<account>:<uid>" (IMAP) or "gmail:<account>:<id>" (Gmail API). */
+  id?: string;
+}
+
+/** One email in full, for read_email. */
+export interface MailMessage {
+  date: string;
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  links: Link[];
+  attachments: string[];
 }
 
 export type MailAccount = "school" | "personal" | "alex" | "sam";
@@ -145,6 +158,8 @@ export async function searchMail(opts: {
   days?: number;
   account?: MailAccount;
   limit?: number;
+  /** Gmail terms always applied (e.g. "-in:sent"), whatever the query says. */
+  exclude?: string;
 }): Promise<MailHit[]> {
   const account = opts.account || "school";
   const creds = accountCreds(account);
@@ -173,7 +188,7 @@ export async function searchMail(opts: {
   const lock = await client.getMailboxLock(all || "INBOX");
   try {
     const q = opts.query?.trim() || "";
-    const criteria: Record<string, unknown> = gmail ? { gmraw: `newer_than:${days}d -in:spam -in:trash ${q}`.trim() } : { since };
+    const criteria: Record<string, unknown> = gmail ? { gmraw: `newer_than:${days}d -in:spam -in:trash ${q ? `(${q})` : ""} ${opts.exclude || ""}`.trim() } : { since };
     if (!gmail && q) criteria.text = q;
     const uids = ((await client.search(criteria as any, { uid: true })) || []).slice(-limit).reverse();
     const wantSnippet = uids.length <= 15;
@@ -182,8 +197,10 @@ export async function searchMail(opts: {
       if (!msg) continue;
       let snippet = "";
       if (wantSnippet && msg.source) {
+        // bodyOf, not parsed.text: forwards from Outlook and many work accounts are HTML-only, and
+        // their plain text came back empty (a parent's forward once reached Kimi as just its subject).
         const parsed = await simpleParser(msg.source);
-        snippet = (parsed.text || "").replace(/\s+/g, " ").trim().slice(0, 300);
+        snippet = bodyOf(parsed).text.replace(/\s+/g, " ").trim().slice(0, 300);
       }
       const env = msg.envelope;
       out.push({
@@ -192,6 +209,7 @@ export async function searchMail(opts: {
         subject: env?.subject || "",
         snippet,
         account,
+        id: `${account}:${uid}`,
       });
     }
   } finally {
@@ -284,3 +302,38 @@ export async function markSeen(uids: number[]): Promise<void> {
     await client.logout();
   }
 }
+
+/** One email in full (body as text, links, attachment names) by its search id. Read-only. */
+export async function readMail(account: MailAccount, uid: number): Promise<MailMessage | null> {
+  const creds = accountCreds(account);
+  if (!creds) throw new Error(`${account} inbox isn't configured`);
+  const client = new ImapFlow({ host: process.env.IMAP_HOST || "imap.gmail.com", port: Number(process.env.IMAP_PORT || 993), secure: true, auth: creds, logger: false });
+  client.on("error", (e: unknown) => console.error("imap error", String(e)));
+  await client.connect();
+  const boxes = await client.list();
+  const lock = await client.getMailboxLock(boxes.find((b) => b.specialUse === "\\All")?.path || "INBOX");
+  try {
+    const msg = await client.fetchOne(uid, { source: true }, { uid: true });
+    if (!msg || !msg.source) return null;
+    return messageOf(await simpleParser(msg.source));
+  } finally {
+    lock.release();
+    await client.logout();
+  }
+}
+
+/** A parsed email as read_email shows it. */
+export function messageOf(parsed: Awaited<ReturnType<typeof simpleParser>>): MailMessage {
+  const body = bodyOf(parsed);
+  const to = Array.isArray(parsed.to) ? parsed.to.map((a) => a.text).join(", ") : parsed.to?.text || "";
+  return {
+    date: parsed.date?.toISOString() ?? "",
+    from: parsed.from?.text ?? "",
+    to,
+    subject: parsed.subject ?? "",
+    text: body.text,
+    links: body.links,
+    attachments: (parsed.attachments || []).map((a) => `${a.filename || "(unnamed)"} (${a.contentType})`),
+  };
+}
+

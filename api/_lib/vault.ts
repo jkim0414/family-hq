@@ -38,6 +38,21 @@ export function decrypt(enc: VaultEntry["enc"]): string {
   return Buffer.concat([d.update(Buffer.from(enc.ct, "base64")), d.final()]).toString("utf8");
 }
 
+/** A token kept at rest: encrypted when VAULT_KEY is set (older plaintext values still read). */
+export type Sealed = string | VaultEntry["enc"];
+export function seal(text: string): Sealed {
+  return vaultConfigured() ? encrypt(text) : text;
+}
+export function unseal(v: Sealed | null | undefined): string | null {
+  if (!v) return null;
+  if (typeof v === "string") return v;
+  try {
+    return decrypt(v);
+  } catch {
+    return null;
+  }
+}
+
 const norm = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "-").slice(0, 40);
 
 export async function addCredential(input: { name: string; site: string; username: string; password: string }): Promise<VaultEntry> {

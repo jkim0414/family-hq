@@ -1,6 +1,6 @@
 import { recordUsage } from "./usage.js";
 import Anthropic from "@anthropic-ai/sdk";
-import { getCollection, setCollection, redis } from "./db.js";
+import { getCollection, setCollection, redis, appendItems, trimCollection } from "./db.js";
 import type { Purchase, Member, SpendCategory } from "../../src/data/types";
 import { SPEND_CATEGORIES, toSpendCategory } from "../../src/data/spending.js";
 import type { RecentMessage } from "./imap.js";
@@ -94,17 +94,22 @@ export function samePurchase(a: { merchant: string; amount: number; date: string
 }
 
 /** Did Kimi complete a checkout at this merchant in the few days before the receipt? (and was it a private one?) */
-async function kimiMade(merchant: string, from: string, date: string): Promise<{ privateTo?: Member } | null> {
+async function kimiMade(merchant: string, from: string, date: string, account?: string): Promise<{ privateTo?: Member; audience?: Member[] } | null> {
   const keys = await redis.keys("kimi_purchase:*").catch(() => [] as string[]);
   if (!keys.length) return null;
-  const marks = (await redis.mget<({ host: string; at: string; privateTo?: Member } | null)[]>(...keys).catch(() => [])) || [];
+  const marks = (await redis.mget<({ host: string; at: string; privateTo?: Member; audience?: Member[] } | null)[]>(...keys).catch(() => [])) || [];
   const hay = norm(`${merchant} ${from}`);
   const hit = marks.find((k) => {
     if (!k?.host) return false;
     const base = norm(k.host.split(".").slice(-2, -1)[0] || k.host);
     return base.length >= 3 && hay.includes(base) && dayDiff(k.at, date) <= 3;
   });
-  return hit ? { privateTo: hit.privateTo } : null;
+  if (!hit) return null;
+  // Kept where it was asked (a Just-me chat, a chat with Grandma) — when the receipt is in the inbox of
+  // someone in that chat. In another inbox, its owner already has the email: nothing to keep from them.
+  const scope = hit.privateTo ? [hit.privateTo] : hit.audience || [];
+  if (!scope.length || !account || !scope.includes(account as Member)) return {};
+  return hit.privateTo ? { privateTo: hit.privateTo } : { audience: hit.audience };
 }
 
 /**
@@ -115,8 +120,8 @@ export async function recordReceipts(account: "alex" | "sam", msgs: RecentMessag
   const existing = await getCollection("spending");
   const added = await extractPurchases(account, msgs, existing);
   if (!added.length) return 0;
-  const all = [...existing, ...added].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 1000);
-  await setCollection("spending", all);
+  await appendItems("spending", added);
+  await trimCollection("spending", 1000);
   return added.length;
 }
 
@@ -160,8 +165,8 @@ export async function extractPurchases(account: "alex" | "sam", msgs: RecentMess
       category: asCategory(x.category),
       account,
       ...(await (async () => {
-        const made = await kimiMade(x.merchant!, m.from, date);
-        return made ? { byKimi: true, ...(made.privateTo ? { privateTo: made.privateTo } : {}) } : {};
+        const made = await kimiMade(x.merchant!, m.from, date, account);
+        return made ? { byKimi: true, ...(made.privateTo ? { privateTo: made.privateTo } : {}), ...(made.audience ? { audience: made.audience } : {}) } : {};
       })()),
       source: "email",
       sourceKey: keyOf(m),

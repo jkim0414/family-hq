@@ -1,7 +1,6 @@
+import { disablePush } from "./push";
 import { normalizeProfile } from "./data/facts";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { KIDS } from "./data/kids";
-import { CONTACTS, PLACES, ROUTINES } from "./data/meta";
 import type { Comm, Contact, CalEvent, Kid, Place, Routine, Todo, Suggestion, HouseholdProfile, Action, AuditEntry, Purchase, Schedule } from "./data/types";
 
 export interface AppState {
@@ -25,10 +24,11 @@ export interface AppState {
 // Initial state before live data loads: the real roster/directory (stable, bundled)
 // with EMPTY dynamic collections — so no demo comms/events/todos ever flash on load.
 const INITIAL: AppState = {
-  kids: KIDS,
-  places: PLACES,
-  contacts: CONTACTS,
-  routines: ROUTINES,
+  // Filled from /api/data after sign-in; nothing family-specific is built into the app.
+  kids: [],
+  places: [],
+  contacts: [],
+  routines: [],
   comms: [],
   events: [],
   todos: [],
@@ -314,14 +314,17 @@ export function DataProvider({ children }: { children: ReactNode }) {
   }
 
   async function requestLogin(email: string) {
-    await fetch("/api/auth/request", {
+    const r = await fetch("/api/auth/request", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ email }),
     });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({})))?.error || "Couldn't send the code.");
   }
 
   async function logout() {
+    // A signed-out device stops getting notifications (they carry message previews).
+    await disablePush().catch(() => {});
     await fetch("/api/auth/session", { method: "POST" }).catch(() => {});
     try {
       localStorage.removeItem(CACHE_KEY);

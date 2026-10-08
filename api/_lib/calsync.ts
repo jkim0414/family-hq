@@ -1,13 +1,9 @@
-import { listCalendarEvents } from "./calendar.js";
+import { listCalendarEvents, calendarEventGone } from "./calendar.js";
+import { toHomeZone } from "../../src/data/tz.js";
 import { classify, profileContext } from "./classify.js";
-import {
-  appendItems,
-  getCollection,
-  getProfile,
-  getCalVersions,
-  setCalVersions,
-} from "./db.js";
+import { appendItems, getCollection, setCollection, getProfile, getCalVersions, setCalVersions, removeItems } from "./db.js";
 import { CONFIG } from "../../src/data/config.js";
+import { canSee, onSharedCalendar } from "./privacy.js";
 import { todosSimilar, adjustPrepDue } from "./util.js";
 import { completePartyPrep } from "./conventions.js";
 import { fetchLinkedPages } from "./links.js";
@@ -38,6 +34,7 @@ export interface CalSyncResult {
   scanned: number;
   imported: number;
   updated: number; // mirrors refreshed because the GCal event was edited
+  removed?: number; // events deleted from Google Calendar, removed from the app too
   todos: number;
   skipped: number;
   preview?: { title: string; date: string; people: string[]; todos: string[]; action: string }[];
@@ -64,8 +61,8 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
   result.scanned = raw.length;
   if (!raw.length) return result;
 
-  // Private items (a parent's Just-me chat) are never matched, shown to the classifier, or updated by filing.
-  const existingEvents = (await getCollection("events")).filter((e) => !e.privateTo);
+  // Private and chat-kept items (a Just-me chat, a chat with Grandma) are never matched, shown to the classifier, or updated by filing.
+  const existingEvents = (await getCollection("events")).filter((e) => canSee(e, "family"));
   // App-created events (via email/capture) — never mirror these.
   const mirrorsByGcal = new Map(
     existingEvents.filter((e) => e.source === "calendar" && e.gcalId).map((e) => [e.gcalId as string, e])
@@ -73,12 +70,12 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
   const appGcalIds = new Set(existingEvents.map((e) => e.gcalId).filter(Boolean) as string[]);
   const versions = await getCalVersions();
 
-  const profileCtx = profileContext(await getProfile());
+  const profileCtx = profileContext(await getProfile().then((p) => ({ ...p, facts: p.facts.filter((f) => canSee(f, "family")) })));
   const ctx = `Reference dates: today is ${from} (timezone ${CONFIG.calendar.timeZone}).\n${profileCtx}`;
 
   const newEvents: CalEvent[] = [];
   const newTodos: Todo[] = [];
-  const existingTodos = (await getCollection("todos")).filter((t) => !t.privateTo);
+  const existingTodos = (await getCollection("todos")).filter((t) => canSee(t, "family"));
   const newComms: Comm[] = [];
   const changedMirrors: CalEvent[] = [];
   const verUpdates: Record<string, string> = {};
@@ -89,9 +86,30 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
 
     const mirror = mirrorsByGcal.get(ev.id);
 
-    // Skip (record version, no mirror): app-created events that aren't mirrors,
-    // declined, non-default types, or recurring-series instances (routine noise).
-    if ((appGcalIds.has(ev.id) && !mirror) || ev.declined || ev.eventType !== "default" || ev.recurringEventId) {
+    // An event the app put on Google Calendar that a parent then edited there: the edit wins —
+    // take its title, time, and place (the app's own notes, people, and owners stay). Without
+    // this the app kept the old version and the next filing made a duplicate.
+    const appOwned = appGcalIds.has(ev.id) && !mirror ? existingEvents.find((e) => e.gcalId === ev.id) : undefined;
+    if (appOwned && versions[ev.id] && !ev.recurringEventId) {
+      // Compared as home-zone times: a flight stored in Eastern time isn't "edited" just because
+      // Google reports it in Pacific.
+      const h = (x: { date: string; start?: string; end?: string; endDate?: string; allDay?: boolean; startTz?: string; endTz?: string }) => { const z = toHomeZone({ ...x, allDay: !!x.allDay }); return [z.date, z.start || "", z.end || "", x.endDate || ""]; };
+      const before = JSON.stringify([appOwned.title, ...h(appOwned), appOwned.location || ""]);
+      const after = JSON.stringify([ev.title, ...h(ev), ev.location || ""]);
+      if (before !== after) {
+        Object.assign(appOwned, { title: ev.title, date: ev.date, start: ev.start, end: ev.end, endDate: ev.endDate, startTz: ev.startTz, endTz: ev.endTz, allDay: ev.allDay, location: ev.location });
+        changedMirrors.push(appOwned);
+        result.updated++;
+        result.preview!.push({ title: ev.title, date: ev.date, people: appOwned.people || [], todos: [], action: "updated (edited in Google Calendar)" });
+      }
+      verUpdates[ev.id] = ev.updated;
+      continue;
+    }
+
+    // Skip (record version, no mirror): app-created events that aren't mirrors, declined,
+    // unanswered invitations from outside the family (picked up once accepted: that changes
+    // `updated`), non-default types, or recurring-series instances (routine noise).
+    if ((appGcalIds.has(ev.id) && !mirror) || ev.declined || (ev.strangerInvite && !mirror) || ev.eventType !== "default" || ev.recurringEventId) {
       verUpdates[ev.id] = ev.updated;
       result.skipped++;
       continue;
@@ -218,8 +236,32 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
     });
   }
 
+  // Deleted in Google Calendar → gone from the app too. Only events on the calendar (they have a
+  // gcalId) that fall inside the window just read, and only once Google confirms the deletion.
+  const seen = new Set(raw.map((r) => r.id));
+  const missing = existingEvents
+    .filter((e) => e.gcalId && !seen.has(e.gcalId) && e.date > from && e.date < to)
+    .slice(0, 15);
+  const gone: string[] = [];
+  for (const e of missing) if (await calendarEventGone(e.gcalId!)) gone.push(e.id);
+  result.removed = gone.length;
+  for (const id of gone) {
+    const e = existingEvents.find((x) => x.id === id)!;
+    result.preview!.push({ title: e.title, date: e.date, people: e.people || [], todos: [], action: "removed (deleted in Google Calendar)" });
+  }
+
   if (dryRun) return result;
 
+  if (gone.length) {
+    await removeItems("events", gone);
+    // The prep to-dos inferred from a mirrored event go with it (todo-cal-<gcal id>-n), unless done.
+    const prefixes = gone.filter((id) => id.startsWith("evt-cal-")).map((id) => `todo-cal-${id.slice("evt-cal-".length)}-`);
+    if (prefixes.length) {
+      const todos = await getCollection("todos");
+      const drop = todos.filter((t) => !t.done && prefixes.some((p) => t.id.startsWith(p))).map((t) => t.id);
+      if (drop.length) await removeItems("todos", drop);
+    }
+  }
   const eventWrites = [...newEvents, ...changedMirrors];
   if (eventWrites.length) await appendItems("events", eventWrites);
   if (newTodos.length) await appendItems("todos", newTodos);

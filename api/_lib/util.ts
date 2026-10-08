@@ -59,10 +59,15 @@ export function titlesSimilar(a: string, b: string): boolean {
 
 /** Same calendar day + similar title → treat as the same event. */
 export function eventsSimilar(
-  a: { date: string; title: string },
-  b: { date: string; title: string }
+  a: { date: string; title: string; endDate?: string },
+  b: { date: string; title: string; endDate?: string }
 ): boolean {
-  return a.date === b.date && titlesSimilar(a.title, b.title);
+  if (!titlesSimilar(a.title, b.title)) return false;
+  if (a.date === b.date) return true;
+  // A day inside a span is the same thing ("Thanksgiving Break" Nov 23–27 vs a single "Thanksgiving
+  // Break" on Nov 25), and so are two overlapping spans of it.
+  const aEnd = a.endDate || a.date, bEnd = b.endDate || b.date;
+  return a.date <= bEnd && b.date <= aEnd && (!!a.endDate || !!b.endDate);
 }
 
 import { peopleOf } from "../../src/data/people.js";

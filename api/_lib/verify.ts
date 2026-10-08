@@ -98,7 +98,7 @@ export async function sweepVerifiable(force = false, lastRun?: number): Promise<
     t.done = true;
     t.detail = `Already done — ${ev.where}.${t.detail ? " " + t.detail : ""}`;
     closed++;
-    await addAudit({ kind: "executed", summary: `Marked “${t.title}” done — found proof in ${ev.where}`, by: "hq", privateTo: t.privateTo });
+    await addAudit({ kind: "executed", summary: `Marked “${t.title}” done — found proof in ${ev.where}`, by: "hq", privateTo: t.privateTo, audience: t.audience });
   }
   if (closed) await setCollection("todos", todos);
   return closed;

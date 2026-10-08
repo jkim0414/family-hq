@@ -1,3 +1,4 @@
+import { localSkip } from "./sandbox.js";
 import { CONFIG } from "../../src/data/config.js";
 import { sendEmail } from "./email.js";
 import { userById } from "./auth.js";
@@ -73,15 +74,35 @@ export function smsBody(raw: string): string {
   return t.trim();
 }
 
-/** Send one SMS through Twilio's REST API (no SDK — one form POST). */
+/** A long text in pieces of at most `max` characters, split at paragraphs, then sentences (never mid-word). */
+export function smsChunks(body: string, max = 1500): string[] {
+  const out: string[] = [];
+  let rest = body.trim();
+  while (rest.length > max) {
+    const window = rest.slice(0, max);
+    const cut = Math.max(window.lastIndexOf("\n\n"), window.lastIndexOf("\n"), window.lastIndexOf(". ") + 1, window.lastIndexOf(" "));
+    const at = cut > max * 0.4 ? cut : max;
+    out.push(rest.slice(0, at).trim());
+    rest = rest.slice(at).trim();
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/** Send one SMS through Twilio's REST API (no SDK — one form POST). Long texts go as several, in order. */
 export async function sendSms(to: string, rawBody: string, mediaUrl?: string): Promise<void> {
+  if (localSkip(`text to ${to.slice(-4)}`)) return;
   if (!smsConfigured()) throw new Error("Twilio not configured");
-  const body = smsBody(rawBody);
+  const parts = smsChunks(smsBody(rawBody));
+  for (let i = 0; i < parts.length; i++) await sendOneSms(to, parts[i], i === 0 ? mediaUrl : undefined);
+}
+
+async function sendOneSms(to: string, body: string, mediaUrl?: string): Promise<void> {
   const sid = process.env.TWILIO_ACCOUNT_SID!;
   const auth = Buffer.from(`${sid}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64");
   // A2P 10DLC: sending via the registered campaign's Messaging Service is the
   // carrier-preferred path; fall back to a bare From number if that's all we have.
-  const form = new URLSearchParams({ To: to, Body: body.slice(0, 1500) });
+  const form = new URLSearchParams({ To: to, Body: body });
   if (mediaUrl) form.set("MediaUrl", mediaUrl); // sent as MMS (e.g. Kimi's contact card)
   if (process.env.TWILIO_MESSAGING_SERVICE_SID) form.set("MessagingServiceSid", process.env.TWILIO_MESSAGING_SERVICE_SID);
   else form.set("From", process.env.TWILIO_FROM!);
@@ -107,6 +128,7 @@ export function tapbackText(emoji: string, quoted: string): string | null {
 
 /** Kimi reacts to a parent's text the way a phone does: `Liked “<their message>”`. */
 export async function sendReactionSms(to: string, emoji: string, quoted: string): Promise<void> {
+  if (localSkip(`tapback text to ${to.slice(-4)}`)) return;
   const body = tapbackText(emoji, quoted);
   if (!body || !smsConfigured()) return;
   const sid = process.env.TWILIO_ACCOUNT_SID!;

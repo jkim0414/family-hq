@@ -1,3 +1,4 @@
+import { localSkip } from "./sandbox.js";
 import webpush from "web-push";
 import { redis } from "./db.js";
 
@@ -46,6 +47,7 @@ export async function removeSubscription(userId: string, endpoint: string): Prom
 
 /** Send a notification to every device the parent enabled. Returns how many were delivered. */
 export async function sendPush(userId: string, payload: { title: string; body: string; url?: string; tag?: string }): Promise<number> {
+  if (localSkip(`push to ${userId}`)) return 0;
   if (!pushConfigured()) return 0;
   setup();
   const subs = await getSubscriptions(userId);

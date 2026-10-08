@@ -3,10 +3,10 @@ import { waitUntil } from "@vercel/functions";
 import { validTwilioSignature, twilioAuth, readMedia, MEDIA_OK, SMS_WELCOME, SMS_HELP, OPT_OUT_WORDS, type FetchedMedia } from "../_lib/twilio.js";
 import { ensureGroups, closeGroupAfterStop, postedToGroup } from "../_lib/groupsms.js";
 import { userForPhone, sendSms, smsBody, smsConfigured, getSmsOptIn, setSmsOptIn, CONTACT_CARD_URL } from "../_lib/notify.js";
-import { converse, appendExchange } from "../_lib/agent.js";
+import { converse } from "../_lib/agent.js";
+import { coalesce } from "../_lib/coalesce.js";
 import { privateThreadId, isParent } from "../_lib/privacy.js";
-import { runCapture, describeCapture } from "../_lib/capture.js";
-import { latestPending, decideAction } from "../_lib/actions.js";
+import { pendingFor, pickPending, decideAction } from "../_lib/actions.js";
 import { parseReactionText } from "../_lib/reactions.js";
 import { handleReaction } from "../_lib/tapbacks.js";
 
@@ -23,6 +23,10 @@ async function fetchTwilioMedia(body: Record<string, string>): Promise<FetchedMe
     const url = body[`MediaUrl${i}`];
     const type = (body[`MediaContentType${i}`] || "").toLowerCase();
     if (!url || !MEDIA_OK.test(type)) continue;
+    // Twilio's credentials go only to Twilio.
+    let host = "";
+    try { host = new URL(url).protocol === "https:" ? new URL(url).hostname : ""; } catch { /* invalid */ }
+    if (!/(^|\.)twilio\.com$/.test(host)) continue;
     const m = await readMedia(await fetch(url, { headers: { authorization: twilioAuth() } }).catch(() => null), type);
     if (m) out.push(m);
   }
@@ -112,7 +116,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return twiml(res);
   }
 
-  // A photo or PDF: file it (like an attachment in the app) and text back what was filed.
+  // A photo or PDF goes to Kimi with the words (she files it, or uses it for what was asked).
   if (Number(body.NumMedia || 0) > 0) {
     waitUntil(
       (async () => {
@@ -122,14 +126,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             await sendSms(from, "I couldn't open that attachment. Send a photo (JPEG or PNG) or a PDF, or add it in Family HQ.");
             return;
           }
-          const result = await runCapture({ text, images: media });
-          const reply = describeCapture(result);
-          const shown = `${text || "(no note)"}\n📎 ${media.length} ${media.length === 1 ? "attachment" : "attachments"} by text`;
-          await appendExchange(privateThreadId(who), who, "sms", shown, reply).catch((e) => console.error("sms media: thread append failed", e));
-          await sendSms(from, reply);
+          const { reply } = await converse(privateThreadId(who), who, "sms", text, Date.now() + 200_000, { attachments: media });
+          if (reply) await sendSms(from, reply);
         } catch (e) {
           console.error("sms media failed", e);
-          await sendSms(from, "Something went wrong filing that. Try again, or add it in Family HQ.").catch(() => {});
+          await sendSms(from, String(e).includes("busy") ? "One sec — I'm mid-task. Send it again in a minute." : "Something went wrong with that attachment. Try again, or add it in Family HQ.").catch(() => {});
         }
       })()
     );
@@ -140,11 +141,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // proposal without waking the agent. Fast enough to answer inline. ("Cancel" is
   // not a shortcut: carriers treat CANCEL as an opt-out keyword, and "yes" isn't
   // either: Twilio reserves YES as an opt-in keyword.)
-  const cmd = text.toLowerCase();
-  if (isParent(who) && /^(approve|send|ok|decline|no)\b/.test(cmd)) {
-    const pending = await latestPending(who);
-    if (!pending) return twiml(res, `<Message>${smsBody("Nothing is waiting for approval right now.")}</Message>`);
-    const approve = /^(approve|send|ok)/.test(cmd);
+  // Only the whole message counts ("Ok thanks" or "Send me the schedule" never approves anything),
+  // and with several waiting it names one by its code.
+  const cmd = text.trim().toLowerCase().replace(/[.!]+$/, "");
+  const said = cmd.match(/^(approve|send|decline)(?:\s+#?(\d{4}))?$/);
+  if (isParent(who) && said) {
+    const { action: pending, ask } = pickPending(await pendingFor(who), said[2]);
+    if (!pending) return twiml(res, `<Message>${smsBody(ask!).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Message>`);
+    const approve = said[1] !== "decline";
     const a = await decideAction(pending.id, approve ? "approve" : "decline", who);
     const msg = a.status === "executed" ? `✅ ${a.title} — ${a.result}` : a.status === "declined" ? `Declined: ${a.title}` : `⚠️ ${a.title} failed: ${a.error}`;
     return twiml(res, `<Message>${smsBody(msg).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Message>`);
@@ -154,7 +158,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     (async () => {
       try {
         // One-on-one texts are this parent's private "Just me" thread (a group text would be the family chat).
-        const { reply } = await converse(privateThreadId(who), who, "sms", text, Date.now() + 200_000);
+        // Several texts in a row (a long message split by the phone): answer them once, together.
+        const whole = await coalesce(`sms:${who}`, text);
+        if (whole === null) return;
+        const { reply } = await converse(privateThreadId(who), who, "sms", whole, Date.now() + 200_000);
         if (reply) await sendSms(from, reply);
       } catch (e) {
         console.error("sms converse failed", e);
