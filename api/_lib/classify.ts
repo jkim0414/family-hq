@@ -1,4 +1,5 @@
 import { recordUsage } from "./usage.js";
+import { CONFIG } from "../../src/data/config.js";
 import { renderFacts } from "../../src/data/facts.js";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Attachment } from "./imap.js";
@@ -43,6 +44,12 @@ export interface Classification {
     endTz?: string; // IANA tz of end (e.g. arrival airport)
     location?: string;
     prep?: string;
+    /** Something the family is invited to and chooses whether to attend (see INVITATIONS). */
+    invitation?: boolean;
+    rsvpBy?: string; // YYYY-MM-DD
+    rsvp?: string; // how to RSVP: a link, an email address, instructions
+    /** The household facts say the family skips this kind of event. */
+    skip?: boolean;
   }[];
   todos: {
     title: string;
@@ -51,6 +58,8 @@ export interface Classification {
     priority: "normal" | "high";
     owner?: string[]; // optional per-todo override of who's responsible (e.g. parents for EA-inferred prep)
     people?: string[]; // optional per-todo override of who it's for
+    /** Index into events: prep for that event (held until a yes when it's an invitation). */
+    forEvent?: number;
   }[];
   command?: {
     action: "delete_events" | "edit_events";
@@ -92,6 +101,8 @@ THE FAMILY (ids; add guests by their name as free text, e.g. "Grandma"). EDIT TH
 - max — kid. Maple Grove Elementary, 3rd grade (Ms. Rivera). After school: Maple Grove After-School.
 - theo — kid. Maple Grove Elementary, kindergarten (Mr. Okafor). After school: Maple Grove After-School.
 - ava — kid. Sunny Days Preschool (Ms. Priya, Ms. Dana).
+
+PARENTS' WORK IS NOT FAMILY BUSINESS: ${Object.entries(CONFIG.workplaces).map(([p, w]) => `${p} works at ${w.org} (${w.domains.join(", ")})`).join("; ")}. A parent's own job — meetings, events at their workplace (even ones that look like family events, like a family night held at their workplace), colleagues' mail — is category fyi with NO events and NO to-dos, unless it changes the kids' logistics (then only a to-do about coverage).
 
 TWO DIFFERENT "WHO" FIELDS — set both:
 - "people" = who the item is FOR / about. Usually the kid(s); a guest for their visit; a parent if it's genuinely about them. e.g. a brown bag for Theo's class → ["theo"]; Grandma's flight → ["grandma"].
@@ -140,6 +151,12 @@ CATEGORY (the key decision):
 - action = must do something, but not urgent. E.g. "decide on a Fair date and let friends know", "renew the parking permit this month", "sign up for a conference slot".
 - calendar = a dated thing to know about. E.g. "Field Day June 10", "Aunt Kate arrives June 14 on UA 100", "dentist Tuesday 3pm", "Alex doing drop-off Tue/Thu this week".
 - fyi = nice to know, no action and no date that matters. Daily daycare recaps, photos, newsletters. Logged but never surfaced.
+
+INVITATIONS (decide first): the family decides whether to go BEFORE anything goes on the calendar.
+- invitation=true for anything they're INVITED to and may or may not attend: birthday parties and other parties, district/board/PTA/advisory/committee meetings, info nights and family input sessions, community events, fundraisers and spirit nights, optional workshops, volunteer sign-ups, playdates someone proposed. Set rsvpBy and rsvp when stated (copy an RSVP link exactly).
+- invitation=false (a FIXED date) for what happens regardless: no-school days and breaks, a game or practice already on a schedule, appointments, picture day, field trips and class events the kids are in, a visitor's arrival, anything the parent's note says they're going to or asks to put on the calendar.
+- For an invitation, do NOT add "RSVP", "decide whether to attend", or "consider going" to-dos: the parents are asked directly. Prep to-dos (buy a gift, pack treats, costume) still go in todos with forEvent = that event's index; they wait for a yes.
+- If HOUSEHOLD FACTS say the family skips this kind of event ("we don't go to PTA committee meetings"), set skip=true too.
 
 EVENTS vs TO-DOS (important — keep the calendar uncluttered):
 - A calendar EVENT is something that HAPPENS at a date/time/place the family should see on a calendar: a party, Field Day, Picture Day, a performance, an appointment, a visitor's arrival, a no-school day, an offsite/coverage day.
@@ -218,6 +235,10 @@ const TOOL: Anthropic.Tool = {
             },
             location: { type: "string" },
             prep: { type: "string" },
+            invitation: { type: "boolean", description: "true when the family is INVITED and chooses whether to go (see INVITATIONS). Omit/false for fixed dates." },
+            rsvpBy: { type: "string", description: "YYYY-MM-DD RSVP deadline, if stated" },
+            rsvp: { type: "string", description: "How to RSVP: the RSVP link (copied exactly from the message or linked page), an email address, or one-line instructions" },
+            skip: { type: "boolean", description: "true when HOUSEHOLD FACTS say the family doesn't attend this kind of event" },
           },
           required: ["title", "date", "allDay"],
         },
@@ -231,6 +252,7 @@ const TOOL: Anthropic.Tool = {
             detail: { type: "string" },
             due: { type: "string", description: "YYYY-MM-DD, optional" },
             priority: { type: "string", enum: ["normal", "high"] },
+            forEvent: { type: "integer", description: "Index into events (0-based) when this to-do is prep for that event (buy a gift, pack treats)." },
             owner: {
               type: "array",
               items: { type: "string" },

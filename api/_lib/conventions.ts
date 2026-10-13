@@ -52,22 +52,27 @@ const shift = (date: string, days: number) => {
 export function completePartyPrep(c: Classification, sourceText: string, eventsOverride?: { title: string; date: string }[]): void {
   const events = eventsOverride ?? c.events;
   const noGifts = /no gifts|gifts? not necessary|in lieu of gifts/i.test(sourceText);
-  const themed = /costume|halloween|\bboo\b|boo'?tastic|spooky|dress[- ]up|dress up as/i.test(sourceText);
-  for (const e of events) {
-    if (!PARTY_RE.test(e.title) && !PARTY_RE.test(sourceText.slice(0, 400))) continue;
+  // A costume party says so ("costume", "dress up", "Halloween party") — a bare "Halloween" is
+  // usually an invite site's menu (Evite's, every October), not the party's theme.
+  const themed = /costume|halloween (party|bash|parade|theme|celebration)|\bboo\b|boo'?tastic|spooky|dress[- ]up|dress up as/i.test(sourceText);
+  events.forEach((e, idx) => {
+    if (!PARTY_RE.test(e.title) && !PARTY_RE.test(sourceText.slice(0, 400))) return;
     const child = birthdayChild(e.title);
-    if (!child || OUR_KIDS.includes(child)) continue; // unknown, or one of ours
+    if (!child || OUR_KIDS.includes(child)) return; // unknown, or one of ours
+    // Prep for an invitation waits for a yes (forEvent ties it to the event); no RSVP to-do — the
+    // parents are asked, and Kimi offers to RSVP once they decide.
+    const invite = !eventsOverride && (c.events[idx] as { invitation?: boolean })?.invitation === true;
     const people = c.people.filter((p) => ["max", "theo", "ava"].includes(p));
     const has = (re: RegExp) => c.todos.some((t) => re.test(t.title));
     const add = (title: string, daysBefore: number) =>
-      c.todos.push({ title, due: shift(e.date, -daysBefore), priority: "normal", owner: ["alex", "sam"], people: people.length ? people : undefined });
+      c.todos.push({ title, due: shift(e.date, -daysBefore), priority: "normal", owner: ["alex", "sam"], people: people.length ? people : undefined, ...(eventsOverride ? {} : { forEvent: idx }) });
     if (!noGifts && !has(/\b(buy|get|pick up|order)\b.*\bgift|\bgift\b.*\b(buy|get)\b/i)) add(`Buy a gift for ${child}`, 3);
     if (!noGifts && !has(/\bwrap\b/i)) add(`Wrap gift for ${child}`, 1);
     if (!has(/\bcard\b/i)) add(`Write a card for ${child}`, 1);
     if (!has(/treat|cupcake|snack/i)) add(`Pack allergy-safe treats for ${child}'s party`, 1);
-    if (/\brsvp\b/i.test(sourceText) && !has(/\brsvp\b/i)) add(`RSVP to ${child}'s party`, 7);
+    if (!invite && /\brsvp\b/i.test(sourceText) && !has(/\brsvp\b/i)) add(`RSVP to ${child}'s party`, 7);
     const names = people.map((p) => p[0].toUpperCase() + p.slice(1));
     const who = names.length ? names.join(" & ").replace(/ & (?=.* & )/g, ", ") : "the kids";
     if (themed && !has(/costume/i)) add(`Costumes for ${who} (${/halloween|boo|spooky/i.test(sourceText) ? "Halloween theme" : "party theme"})`, 3);
-  }
+  });
 }

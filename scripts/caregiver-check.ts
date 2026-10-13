@@ -52,7 +52,8 @@ try {
   check("sees the family calendar", d.events.length > 0 && d.events.length >= dj.events.filter((e: any) => !e.privateTo).length, `${d.events.length} events`);
   check("no spending", Array.isArray(d.spending) && d.spending.length === 0 && dj.spending.length > 0);
   check("no activity log", d.audit.length === 0);
-  check("no parents' approvals or schedules", d.actions.every((a: any) => a.requester === "grandma" || a.privateTo === "grandma") && d.schedules.every((s: any) => s.privateTo === "grandma"), `${d.actions.length} actions, ${d.schedules.length} schedules`);
+  // Hers, or from a chat she's in (the "everyone" chat) — never the parents' own.
+  check("no parents' approvals or schedules", d.actions.every((a: any) => a.requester === "grandma" || a.privateTo === "grandma" || a.audience?.includes("grandma")) && d.schedules.every((s: any) => s.privateTo === "grandma" || s.audience?.includes("grandma")), `${d.actions.length} actions, ${d.schedules.length} schedules`);
   check("sees household facts and kids", (d.profile?.facts?.length || 0) > 0 && d.kids.length > 0);
 
   // 2) Conversations and files.

@@ -19,16 +19,6 @@
       "destination": "/index.html"
     }
   ],
-  "crons": [
-    {
-      "path": "/api/digest?mode=daily",
-      "schedule": "0 14 * * *"
-    },
-    {
-      "path": "/api/digest?mode=weekly",
-      "schedule": "0 0 * * 1"
-    }
-  ],
   "functions": {
     "api/router.ts": {
       "maxDuration": 300

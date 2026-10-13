@@ -94,7 +94,7 @@ export default function App() {
   const unread = useChatUnread(onChat, data.me?.id as Member | undefined);
   if (authed === "no") return <Login />;
 
-  const needs = needsYouCount(data.actions, data.suggestions, data.todos, data.me);
+  const needs = needsYouCount(data.actions, data.suggestions, data.todos, data.me, data.invitations);
   const isActive = (to: string) => (to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(to));
   const badge = (to: string) => (to === "/" ? needs : to === "/chat" ? unread : 0);
 

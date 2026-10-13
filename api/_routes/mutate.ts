@@ -62,7 +62,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // Events: sync to Google Calendar and capture the gcal id — never for private events.
       if (collection === "events" && PARENTS.every((p) => canSee(item, p))) {
         try {
-          const gcalId = await updateCalendarEvent(item as CalEvent);
+          const gcalId = await updateCalendarEvent({ ...(prior || {}), ...item } as CalEvent);
           if (gcalId) item.gcalId = gcalId;
         } catch {
           /* non-fatal */

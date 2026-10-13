@@ -3,6 +3,9 @@ import { getState, getStateVersion, getCollection } from "../_lib/db.js";
 import { json } from "../_lib/http.js";
 import { requireUser } from "../_lib/auth.js";
 import { canSee, canSeeArtifact, isParent } from "../_lib/privacy.js";
+import { onCalendar, awaitingDecision } from "../../src/data/invites.js";
+
+const todayPT = () => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 import type { Member } from "../../src/data/types";
 
 // GET /api/data            → app state for the frontend (signed-in members; trimmed by role)
@@ -32,7 +35,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const ours = <T extends { privateTo?: Member; requester?: Member }>(xs: T[]) => (xs || []).filter((x) => canSeeArtifact(x, user.id));
     const slim = {
       ...state,
-      events: mine(state.events),
+      // The calendar shows what's on it; invitations waiting on a decision come separately (Needs you).
+      events: mine(state.events).filter(onCalendar),
+      invitations: mine(state.events).filter((e) => awaitingDecision(e) && (e.endDate || e.date) >= todayPT()),
       todos: mine(state.todos),
       spending: parent ? mine(state.spending) : [],
       schedules: ours(state.schedules),

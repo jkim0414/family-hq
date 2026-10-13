@@ -90,6 +90,7 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
     // take its title, time, and place (the app's own notes, people, and owners stay). Without
     // this the app kept the old version and the next filing made a duplicate.
     const appOwned = appGcalIds.has(ev.id) && !mirror ? existingEvents.find((e) => e.gcalId === ev.id) : undefined;
+    // Occurrences of a repeating event are real plans like any other: mirrored, each its own event.
     if (appOwned && versions[ev.id] && !ev.recurringEventId) {
       // Compared as home-zone times: a flight stored in Eastern time isn't "edited" just because
       // Google reports it in Pacific.
@@ -108,8 +109,8 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
 
     // Skip (record version, no mirror): app-created events that aren't mirrors, declined,
     // unanswered invitations from outside the family (picked up once accepted: that changes
-    // `updated`), non-default types, or recurring-series instances (routine noise).
-    if ((appGcalIds.has(ev.id) && !mirror) || ev.declined || (ev.strangerInvite && !mirror) || ev.eventType !== "default" || ev.recurringEventId) {
+    // `updated`), or non-default types (out of office, focus time).
+    if ((appGcalIds.has(ev.id) && !mirror) || ev.declined || (ev.strangerInvite && !mirror) || ev.eventType !== "default") {
       verUpdates[ev.id] = ev.updated;
       result.skipped++;
       continue;
@@ -131,6 +132,21 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
       verUpdates[ev.id] = ev.updated;
       result.updated++;
       result.preview!.push({ title: ev.title, date: ev.date, people: mirror.people || [], todos: [], action: "updated" });
+      continue;
+    }
+
+    // Another occurrence of a series already read: same people and owners, no second read (and no
+    // weekly repeat of the same inferred to-dos).
+    const sibling = ev.recurringEventId ? [...existingEvents, ...newEvents].find((e) => e.seriesId === ev.recurringEventId) : undefined;
+    if (sibling) {
+      newEvents.push({
+        id: `evt-cal-${ev.id}`, title: ev.title, date: ev.date, start: ev.start, end: ev.end, endDate: ev.endDate, startTz: ev.startTz, endTz: ev.endTz,
+        allDay: ev.allDay, people: sibling.people, owner: sibling.owner, location: ev.location, prep: ev.description, source: "calendar",
+        commId: sibling.commId, gcalId: ev.id, seriesId: ev.recurringEventId,
+      });
+      verUpdates[ev.id] = ev.updated;
+      result.imported++;
+      result.preview!.push({ title: ev.title, date: ev.date, people: sibling.people || [], todos: [], action: "import (repeating)" });
       continue;
     }
 
@@ -208,6 +224,7 @@ export async function importCalendarEvents(opts?: { dryRun?: boolean }): Promise
       source: "calendar",
       commId,
       gcalId: ev.id, // existing GCal event — re-linked, never re-created
+      ...(ev.recurringEventId ? { seriesId: ev.recurringEventId } : {}),
     });
 
     newComms.push({

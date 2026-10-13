@@ -10,14 +10,21 @@ import { CONFIG } from "../../src/data/config.js";
 // Names the family uses for the caregiver, from config (server-only: never in the app bundle).
 registerAliases({ grandma: [CONFIG.caregivers.grandma.name, CONFIG.caregivers.grandma.name.split(" ")[0], CONFIG.caregivers.grandma.callMe].filter(Boolean) });
 import { Redis } from "@upstash/redis";
+import { overlayOn, withOverlay, dropOverlay } from "./overlay.js";
 import { randomBytes } from "node:crypto";
 import type { Kid, Contact, Place, Routine, Comm, CalEvent, Todo, Suggestion, HouseholdProfile, Task, Action, AuditEntry, FileDoc, Purchase, Schedule } from "../../src/data/types";
 
 // Accept either the Upstash-native or Vercel-KV env var names.
-export const redis = new Redis({
+const raw = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL!,
   token: process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN!,
 });
+// Outside the deployed app, writes go to a private overlay (overlay.ts): no local run — a check,
+// a script — can change the family's data unless it's run with LIVE_DATA=1.
+export const redis: Redis = overlayOn() ? withOverlay(raw) : raw;
+export const isOverlay = overlayOn();
+/** End of a check: drop its overlay now (it would also expire on its own). */
+export const dropTestData = () => (isOverlay ? dropOverlay(raw) : Promise.resolve());
 
 export interface AppState {
   kids: Kid[];

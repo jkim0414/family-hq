@@ -5,14 +5,21 @@ import { urgentTodos } from "../agenda";
 import { Card, Button, TextAction } from "./ui";
 import { TodoEditor } from "./editors";
 import { TodoItem } from "./TodoItem";
-import type { Action, EmailPayload, StepPayload, Suggestion, Todo } from "../data/types";
+import type { Action, CalEvent, EmailPayload, StepPayload, Suggestion, Todo } from "../data/types";
 
 // Everything that's waiting on a parent, one row each, approvals first:
 // browser-task steps and emails to approve, suggested calendar/roster changes
 // to confirm, and to-dos that are overdue or due within ~48h. Severity is
 // carried by position and color, never by size.
 
-type Row = { kind: "action"; a: Action } | { kind: "suggestion"; s: Suggestion } | { kind: "todo"; t: Todo };
+type Row = { kind: "action"; a: Action } | { kind: "invite"; e: CalEvent } | { kind: "suggestion"; s: Suggestion } | { kind: "todo"; t: Todo };
+
+const shortDate = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+const time12 = (hhmm?: string) => {
+  if (!hhmm) return "";
+  const [h, m] = hhmm.split(":").map(Number);
+  return ` ${((h + 11) % 12) + 1}${m ? `:${String(m).padStart(2, "0")}` : ""}${h < 12 ? "am" : "pm"}`;
+};
 
 const SHOW = 5;
 
@@ -22,17 +29,18 @@ function urgentFor(todos: Todo[], me?: { id: string; role: string }): Todo[] {
   return me?.role === "caregiver" ? urgent.filter((t) => (t.owner || []).includes(me.id)) : urgent;
 }
 
-export function needsYouCount(actions: Action[] | undefined, suggestions: Suggestion[] | undefined, todos: Todo[], me?: { id: string; role: string }): number {
+export function needsYouCount(actions: Action[] | undefined, suggestions: Suggestion[] | undefined, todos: Todo[], me?: { id: string; role: string }, invitations: CalEvent[] = []): number {
   const today = todayISO();
   return (
     (actions || []).filter((a) => a.status === "proposed").length +
+    (me?.role === "caregiver" ? 0 : invitations.length) +
     (suggestions || []).filter((s) => !s.notBefore || s.notBefore <= today).length +
     urgentFor(todos, me).length
   );
 }
 
 export function NeedsYou() {
-  const { data, decideAction, suggestion, toggleTodo } = useData();
+  const { data, decideAction, suggestion, toggleTodo, refresh } = useData();
   const [all, setAll] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -41,6 +49,8 @@ export function NeedsYou() {
   const today = todayISO();
   const rows: Row[] = [
     ...(data.actions || []).filter((a) => a.status === "proposed").map((a): Row => ({ kind: "action", a })),
+    // Invitations: the parents decide before anything goes on the calendar.
+    ...(data.me?.role === "caregiver" ? [] : (data.invitations || []).map((e): Row => ({ kind: "invite", e }))),
     ...data.suggestions.filter((s) => !s.notBefore || s.notBefore <= today).map((s): Row => ({ kind: "suggestion", s })),
     ...urgentFor(data.todos, data.me).map((t): Row => ({ kind: "todo", t })),
   ];
@@ -70,6 +80,37 @@ export function NeedsYou() {
           if (row.kind === "todo") {
             const t = row.t;
             return <TodoItem key={t.id} todo={t} done={false} onToggle={() => toggleTodo(t.id, true)} onEdit={() => setEditTodo(t)} />;
+          }
+
+          if (row.kind === "invite") {
+            const e = row.e;
+            const decide = (going: boolean) =>
+              run(e.id, async () => {
+                await fetch("/api/invite", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: e.id, going }) });
+                refresh();
+              });
+            return (
+              <div key={e.id} className="flex items-start gap-3 px-4 py-3">
+                <span className="mt-0.5 shrink-0 text-base leading-none">✉️</span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-ink-3">Invitation{e.invite?.rsvpBy ? ` · RSVP by ${shortDate(e.invite.rsvpBy)}` : ""}</div>
+                  <div className="break-words text-sm font-medium text-ink">{e.title}</div>
+                  <div className="mt-0.5 break-words text-xs text-ink-3">
+                    {shortDate(e.date)}
+                    {e.allDay ? "" : time12(e.start)}
+                    {e.location ? ` · ${e.location}` : ""}
+                  </div>
+                  <div className="mt-1.5 flex gap-2">
+                    <Button size="sm" disabled={busy === e.id} onClick={() => decide(true)}>
+                      Going
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busy === e.id} onClick={() => decide(false)}>
+                      Not going
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            );
           }
 
           if (row.kind === "suggestion") {

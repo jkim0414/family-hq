@@ -68,8 +68,24 @@ Theo, and Ava) is fictional.
   filled straight into the page server-side; the model never sees them and page reads mask
   them. Payments to people are a Venmo link the parent confirms.
 - **Keeps a spending log** from order and payment receipts in the inboxes.
-- **Weather and drive times.** Daily digest with the forecast, rain/heat notes for outdoor
-  events, and "leave by" times with a push before it's time to go.
+- **One morning text.** At 7:30, one text to both parents: invitations waiting on a decision,
+  to-dos overdue or due in the next two days (each checked for proof it's already done first),
+  and today in a line; Sundays add the week ahead. Reply in words ("the Tuesday one", "done",
+  "remind me Friday"). Nothing is sent when nothing needs you.
+- **Invitations: decide first.** Parties, school and PTA meetings, info nights, and sign-ups wait
+  as decisions instead of landing on the calendar; soon ones are asked about by text right away.
+  A yes puts it on the calendar with who's going, creates its prep, and Kimi offers to RSVP; a no
+  archives it. "We don't do X" is remembered.
+- **One conversation, app or text.** A chat in the app also reaches people by text (a shared chat
+  to its group text), and anything Kimi starts on her own goes by text, so a family member who
+  never opens the app still gets everything.
+- **Work stays work.** Each parent's workplace is configured; mail about a parent's own job never
+  lands on the family calendar. For a parent whose work-calendar entries without attendees are
+  often real commitments, Kimi judges each one and asks them privately when unsure.
+- **Repeating events are events.** Every occurrence of a weekly event is mirrored like any
+  other; editing a family member's own event changes only its title, time, and place.
+- **Weather and drive times.** The forecast, rain/heat notes for outdoor events, and "leave by"
+  times with a push before it's time to go.
 - **Speaks as herself.** Kimi sends from her own address and number; she never writes to
   people as a parent.
 - **Treats what she reads as information, not orders.** Emails, web pages, invites, and search
@@ -100,8 +116,10 @@ Login is a 6-digit emailed code, parents only.
 
 - **Backend:** one Vercel serverless function (`api/router.ts`) serving every route in
   `api/_routes/**`.
-- **Data:** Upstash Redis — collections as JSON documents, a version counter for cheap
-  polling, tasks split into metadata and model thread.
+- **Data:** Upstash Redis — each collection a hash with one field per item (writers never
+  overwrite each other), a version counter for cheap polling, tasks split into metadata and model
+  thread. Local runs (checks, scripts) write to a private overlay that expires on its own, so they
+  can't change real data (`api/_lib/overlay.ts`; `LIVE_DATA=1` for a deliberate repair).
 - **AI:** Claude via the Anthropic API — a larger model for the agent, small models for
   triage, classification, receipts, and the safety check. Prompts are cached; finished chat
   turns are compacted.
@@ -111,7 +129,8 @@ Login is a 6-digit emailed code, parents only.
 - **Browser:** Browserbase (hosted Chrome over CDP, driven with `playwright-core`); a local
   Chromium in development.
 - **Scheduling:** an external cron hits `/api/ingest` every minute; each stage self-gates
-  (inbox watch and calendar mirror every ~15 minutes). Scheduled tasks live in Redis; the
+  (inbox watch and calendar mirror every ~15 minutes; invitations and the morning text every 5).
+  Scheduled tasks live in Redis; the
   cron reads a single "next run" key until one is due.
 - **SMS:** Twilio, one-on-one through a Messaging Service webhook (`/api/sms`) and the family
   group text through Twilio Conversations group MMS (`api/_lib/groupsms.ts`, `/api/sms/group`).

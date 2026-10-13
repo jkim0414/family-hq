@@ -41,8 +41,15 @@ function names(s: string): Set<string> {
   return out;
 }
 
-/** True if two titles likely describe the same thing. */
+/**
+ * True if two titles likely describe the same thing. A parenthetical is context, not the thing
+ * itself: "Book Fair (after the Spring Concert)" is not "Spring Concert"
+ * (a match like that would link a new event to another one, and every edit would overwrite it).
+ */
 export function titlesSimilar(a: string, b: string): boolean {
+  const core = (s: string) => s.replace(/\([^)]*\)/g, " ").trim() || s;
+  a = core(a);
+  b = core(b);
   const A = tokens(a);
   const B = tokens(b);
   if (!A.size || !B.size) return false;
@@ -57,12 +64,20 @@ export function titlesSimilar(a: string, b: string): boolean {
   return true;
 }
 
-/** Same calendar day + similar title → treat as the same event. */
+/** Start times (HH:mm) more than 15 minutes apart: two different things, whatever the titles. */
+export function startsDiffer(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  const m = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+  return Math.abs(m(a) - m(b)) > 15;
+}
+
+/** Same calendar day + similar title (+ about the same start, when both have one) → the same event. */
 export function eventsSimilar(
-  a: { date: string; title: string; endDate?: string },
-  b: { date: string; title: string; endDate?: string }
+  a: { date: string; title: string; endDate?: string; start?: string },
+  b: { date: string; title: string; endDate?: string; start?: string }
 ): boolean {
   if (!titlesSimilar(a.title, b.title)) return false;
+  if (startsDiffer(a.start, b.start)) return false;
   if (a.date === b.date) return true;
   // A day inside a span is the same thing ("Thanksgiving Break" Nov 23–27 vs a single "Thanksgiving
   // Break" on Nov 25), and so are two overlapping spans of it.

@@ -1,9 +1,9 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { authorized, json } from "../_lib/http.js";
 import { fetchUnseen, markSeen } from "../_lib/imap.js";
-import { isUidSeen, markUidSeen, redis, setLastCalSync } from "../_lib/db.js";
+import { isOverlay, isUidSeen, markUidSeen, redis, setLastCalSync } from "../_lib/db.js";
 import { importCalendarEvents, type CalSyncResult } from "../_lib/calsync.js";
-import { runDueTasks, runDueSchedules } from "../_lib/agent.js";
+import { runInvitationsAndRoundup, runDueTasks, runDueSchedules } from "../_lib/agent.js";
 import { fileMessages, type FileInput } from "../_lib/file-mail.js";
 import { runWatch, type WatchStats } from "../_lib/watch.js";
 import { sweepVerifiable } from "../_lib/verify.js";
@@ -20,7 +20,8 @@ const SKIP_SENDERS = [/accounts\.google\.com/i, /no-?reply@google/i, /mailer-dae
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
   // ?probe=1: is this deployment allowed to write the calendar and send messages? (Local runs aren't.)
-  if (req.query.probe === "1") return json(res, 200, { outward: outwardEnabled(), vercel: !!process.env.VERCEL });
+  // overlay: whether writes go to a private test overlay (must be false here).
+  if (req.query.probe === "1") return json(res, 200, { outward: outwardEnabled(), vercel: !!process.env.VERCEL, overlay: isOverlay });
   const quiet = req.query.quiet === "1"; // suppress alert emails + calendar invites (bulk backlog)
   const started = Date.now();
 
@@ -36,9 +37,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Every later stage is time-gated. Read all the gates in ONE command: this runs
     // every minute, so an idle tick is now smembers + mget (tasks) + this mget.
-    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast, schedulesNext, lastSeen, groupsLast] =
+    const [lastCal, watchAlex, watchSam, watchLast, verifyLast, schoolLast, travelLast, leaveLast, schedulesNext, lastSeen, groupsLast, invitesLast] =
       (await redis
-        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last", "schedules_next", "ingest_seen", "groups_last")
+        .mget<unknown[]>("last_calsync", "watch:alex", "watch:sam", "watch_last", "verify_sweep_last", "school_inbox_last", "travel_last", "leave_check_last", "schedules_next", "ingest_seen", "groups_last", "invites_last")
         .catch(() => null)) || [];
     const num = (v: unknown) => Number(v || 0);
     // "The heartbeat is running" for the Kimi tab's Setup list — refreshed every 10 minutes, not every tick.
@@ -50,6 +51,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (num(schedulesNext) && Date.now() >= num(schedulesNext)) scheduled = await runDueSchedules(started + 200_000);
     } catch (e) {
       console.error("scheduled tasks failed", e);
+    }
+
+    // Invitations that are soon get asked about by text; the morning text goes out once a day (every 5 min).
+    let invites: { asked: number; roundup: boolean; expired: number } | null = null;
+    try {
+      if (Date.now() - num(invitesLast) >= 5 * 60 * 1000) {
+        await redis.set("invites_last", Date.now());
+        invites = await runInvitationsAndRoundup(started + 200_000);
+      }
+    } catch (e) {
+      console.error("invitations / morning text failed", e);
     }
 
     // Mirror the Personal calendar (time-gated to ~every 15 min so frequent

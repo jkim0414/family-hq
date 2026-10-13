@@ -13,6 +13,7 @@ import { json } from "./_lib/http.js";
 import data from "./_routes/data.js";
 import mutate from "./_routes/mutate.js";
 import todo from "./_routes/todo.js";
+import invite from "./_routes/invite.js";
 import capture from "./_routes/capture.js";
 import profile from "./_routes/profile.js";
 import suggestion from "./_routes/suggestion.js";
@@ -46,6 +47,7 @@ const ROUTES: Record<string, Handler> = {
   data,
   mutate,
   todo,
+  invite,
   capture,
   profile,
   suggestion,

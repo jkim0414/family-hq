@@ -9,6 +9,8 @@ import { completePartyPrep } from "./conventions.js";
 import { closeIfAlreadyDone } from "./verify.js";
 import { CONFIG } from "../../src/data/config.js";
 import { canSee, onSharedCalendar } from "./privacy.js";
+import { inviteOf, routeTodo, holdTodo, mergeInvite } from "./invites.js";
+import { onCalendar } from "../../src/data/invites.js";
 import type { Member, CalEvent, Comm, Todo, Suggestion } from "../../src/data/types";
 
 // The "file this" pipeline: classify a note / photo / PDF the same way as a
@@ -275,7 +277,9 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     return { ok: true, duplicate: true, summary: c.summary, updated: updatedEvents.length, deletesQueued };
   }
 
+  const placed: (CalEvent | undefined)[] = [];
   c.events.forEach((e, i) => {
+    const invite = inviteOf(e);
     const candidate: CalEvent = {
       id: `evt-${base}-${i}`,
       title: e.title,
@@ -292,6 +296,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
       prep: e.prep,
       source: c.source,
       commId,
+      ...(invite ? { invite } : {}),
     };
     if (kept) Object.assign(candidate, kept);
     // Update an existing similar event in place instead of duplicating (a kept one never touches shared ones).
@@ -300,13 +305,17 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
       newEvents.find((ex) => eventsSimilar(ex, candidate));
     if (match) {
       mergeEventDetails(match, candidate);
+      mergeInvite(match, candidate);
       eventIds.push(match.id);
+      placed[i] = match;
       if (existingEvents.includes(match) && !updatedEvents.includes(match)) updatedEvents.push(match);
       return;
     }
     eventIds.push(candidate.id);
+    placed[i] = candidate;
     newEvents.push(candidate);
   });
+  const invitationsHere = c.events.some((e) => e.invitation);
 
   // Deletions queue last: by now eventIds holds every event this run created,
   // corrected, or matched — none of those may be deleted.
@@ -314,12 +323,16 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
 
   const eventDates = [...existingEvents, ...newEvents].filter((e) => eventIds.includes(e.id)).map((e) => e.date);
   c.todos.forEach((t, i) => {
+    // Prep for an invitation waits for a yes; "decide / RSVP" to-dos for one aren't made (they're asked).
+    const route = routeTodo(t, (k) => placed[k], invitationsHere, placed);
+    if (route === "drop") return;
     // A to-do is by definition an action someone must DO, so it must have an owner.
     // Prefer a per-todo override, else the item-level owner, else default to both parents.
     const ownerSrc = Array.isArray(t.owner) && t.owner.length ? t.owner : c.owner;
     const owner = ownerSrc.length ? ownerSrc : ["alex", "sam"];
     const people = Array.isArray(t.people) && t.people.length ? t.people : c.people;
     const todo: Todo = adjustPrepDue({ id: `todo-${base}-${i}`, title: t.title, detail: t.detail, due: t.due, people, owner, priority: t.priority, done: false, source: c.source, commId, ...(kept || {}) }, eventDates);
+    if (route !== "create") return holdTodo(route, todo);
     const dup = [...(kept ? [] : existingTodos), ...newTodos].find((x) => !x.done && todosSimilar(x, todo));
     if (dup) {
       todoIds.push(dup.id);
@@ -331,7 +344,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   await closeIfAlreadyDone(newTodos, linked);
 
   for (const evt of newEvents) {
-    if (!onSharedCalendar(evt)) continue;
+    if (!onSharedCalendar(evt) || !onCalendar(evt)) continue;
     try {
       const gcalId = await createCalendarEvent(evt, { silent });
       if (gcalId) evt.gcalId = gcalId;
@@ -340,6 +353,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
     }
   }
   for (const evt of updatedEvents) {
+    if (!onCalendar(evt)) continue;
     try {
       // Corrections sync silently — attendees' calendars update without an
       // email per event (a season reconcile can touch many at once).

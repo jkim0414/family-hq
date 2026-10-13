@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { authorized, json, esc } from "../_lib/http.js";
 import { canSee } from "../_lib/privacy.js";
+import { onCalendar } from "../../src/data/invites.js";
 import { CONFIG } from "../../src/data/config.js";
 import { getCollection } from "../_lib/db.js";
 import { sendEmail } from "../_lib/email.js";
@@ -43,6 +44,8 @@ function relDay(iso: string, today: string): string {
 }
 
 // GET /api/digest?mode=daily|weekly (Bearer CRON_SECRET)
+// Not scheduled by default: the morning text (runInvitationsAndRoundup) replaced the
+// daily and weekly emails. Still callable by hand (e.g. ?dry=1 to preview).
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
   const mode = req.query.mode === "weekly" ? "weekly" : "daily";
@@ -51,7 +54,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     // The digest goes to both parents: only what both may see (nothing private, nothing kept in a chat).
     const [allEvents, allTodos] = await Promise.all([
-      getCollection("events").then((xs) => xs.filter((x) => canSee(x, "family"))),
+      getCollection("events").then((xs) => xs.filter((x) => canSee(x, "family") && onCalendar(x))),
       getCollection("todos").then((xs) => xs.filter((x) => canSee(x, "family"))),
     ]);
     const today = todayPT();

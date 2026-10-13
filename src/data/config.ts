@@ -12,6 +12,18 @@ export const CONFIG = {
     sam: { name: "Sam Carter", email: "sam@example.com", phone: "+15550100002" },
   },
 
+  // Where each parent works: mail about their job (meetings, events at their workplace) is work,
+  // not family business — never filed onto the family calendar.
+  workplaces: {
+    // EDIT: each parent's employer and work email domains.
+    alex: { org: "Acme Corp", domains: ["acme.example"] },
+    sam: { org: "Globex", domains: ["globex.example"] },
+  } as Record<string, { org: string; domains: string[] }>,
+
+  // Whose work-calendar entries without other attendees can be real commitments (a standing meeting,
+  // a shift), not just self-placed holds. Kimi judges each one, and asks them when unsure.
+  judgeAttendeeless: [] as string[], // EDIT: e.g. ["alex"] for a parent whose solo calendar entries are often commitments
+
   // Other household members who use Kimi. A caregiver sees the family calendar, to-dos, kids,
   // household facts and inboxes, and has her own private chat; she doesn't see the parents' chat,
   // spending, logins/cards, or work-calendar details, and anything that costs money waits for a

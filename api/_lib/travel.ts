@@ -1,4 +1,5 @@
 import { canSee } from "./privacy.js";
+import { onCalendar } from "../../src/data/invites.js";
 import { redis, getProfile, getCollection, setCollection } from "./db.js";
 import { notify } from "./notify.js";
 import { toHomeZone, fmt12, HOME_TZ } from "../../src/data/tz.js";
@@ -148,6 +149,7 @@ export async function checkLeaveAlerts(): Promise<number> {
   const mins = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
   let sent = 0;
   for (const e of events) {
+    if (!onCalendar(e)) continue; // no "leave by" for an invitation nobody said yes to
     if (e.allDay || !e.travelMin || e.travelMin < 10 || e.travelMin > 180) continue;
     const t = toHomeZone(e);
     if (t.date !== today || !t.start) continue;

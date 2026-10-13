@@ -16,6 +16,8 @@ export interface AppState {
   audit: AuditEntry[];
   spending: Purchase[];
   schedules: Schedule[];
+  /** Invitations waiting on a parent's decision (not on the calendar yet). */
+  invitations?: CalEvent[];
   profile: HouseholdProfile;
   /** Who's signed in. A caregiver gets a trimmed app (her own chat; no money, logins, or setup). */
   me?: { id: string; name: string; role: "parent" | "caregiver" };
@@ -85,6 +87,7 @@ const Ctx = createContext<DataCtx | null>(null);
 export function DataProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<AppState>(() => readCache() || INITIAL);
   const [loading, setLoading] = useState(true);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [source, setSource] = useState<"live" | "seed">("seed");
   const [authed, setAuthed] = useState<Authed>("unknown");
 
@@ -166,15 +169,22 @@ export function DataProvider({ children }: { children: ReactNode }) {
   }, []);
 
   function toggleTodo(id: string, done: boolean) {
-    setData((d) => ({
-      ...d,
-      todos: d.todos.map((t) => (t.id === id ? { ...t, done } : t)),
-    }));
+    const flip = (v: boolean) => setData((d) => ({ ...d, todos: d.todos.map((t) => (t.id === id ? { ...t, done: v } : t)) }));
+    flip(done);
+    // A check-off that doesn't save must not look saved.
     fetch("/api/todo", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id, done }),
-    }).catch(() => {/* optimistic; will reconcile on next load */});
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error(String(r.status));
+      })
+      .catch(() => {
+        flip(!done);
+        setSaveError("That didn't save — check your connection and try again.");
+        setTimeout(() => setSaveError(null), 5000);
+      });
   }
 
   async function mutate(
@@ -340,6 +350,11 @@ export function DataProvider({ children }: { children: ReactNode }) {
       value={{ data: visible, loading, source, authed, requestLogin, logout, toggleTodo, mutate, removeWithUndo, capture, suggestion, decideAction, saveProfile, refresh: () => load(true) }}
     >
       {children}
+      {saveError && (
+        <div role="alert" className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-50 flex justify-center px-4 md:bottom-8">
+          <div className="max-w-md rounded-full bg-danger px-4 py-2.5 text-sm text-white shadow-lg">{saveError}</div>
+        </div>
+      )}
       {last && (
         <div role="status" className="fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+5.5rem)] z-50 flex justify-center px-4 md:bottom-8">
           <div className="flex max-w-md items-center gap-3 rounded-full bg-ink px-4 py-2.5 text-sm text-surface shadow-lg">

@@ -1,9 +1,9 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { json } from "../_lib/http.js";
 import { requireUser } from "../_lib/auth.js";
-import { converse } from "../_lib/agent.js";
-import { chatFor, threadMembers } from "../_lib/privacy.js";
-import { pushConfigured, sendPush } from "../_lib/push.js";
+import { waitUntil } from "@vercel/functions";
+import { converse, mirrorAppTurn } from "../_lib/agent.js";
+import { chatFor } from "../_lib/privacy.js";
 
 // POST /api/chat { message, attachments? }  — the one place to tell Kimi anything.
 //
@@ -22,14 +22,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const threadId = chatFor(body?.thread, user.id);
     if (!threadId) return json(res, 403, { error: "not your chat" });
 
-    // In a shared chat with Grandma, the others get a nudge that someone wrote (they read it in the app).
-    const others = threadId === "task-main" ? [] : threadMembers(threadId).filter((m) => m !== user.id);
-    if (others.length && pushConfigured()) {
-      const body = message || "sent a photo";
-      await Promise.all(others.map((m) => sendPush(m, { title: `${user.name} · Kimi chat`, body: body.length > 140 ? body.slice(0, 137) + "…" : body, url: "/chat", tag: threadId }).catch(() => 0)));
-    }
-
     const { reply, task } = await converse(threadId, user.id, "app", message, Date.now() + 100_000, { attachments });
+    // The conversation reaches people by text too (the group text for a shared chat; you, for Just
+    // me), so the text thread has it all. A reply still in progress follows by text when it's done.
+    const said = message || (attachments.length > 1 ? `(${attachments.length} attachments)` : "(a photo)");
+    waitUntil(mirrorAppTurn(threadId, user.id, said, reply || null).catch((e) => console.error("mirror to text failed", e)));
     json(res, 200, { ok: true, reply: reply || null, pending: !reply, status: task.status, log: task.log.slice(-60) });
   } catch (err) {
     if (String(err).includes("busy")) return json(res, 409, { error: "The assistant is mid-task — try again in a moment." });

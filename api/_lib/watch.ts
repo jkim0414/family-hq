@@ -1,6 +1,7 @@
 import { recordUsage } from "./usage.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { redis } from "./db.js";
+import { CONFIG } from "../../src/data/config.js";
 import { KNOWN_SENDERS, senderAddress } from "./senders.js";
 import { fetchRecent, inboxConfigured, type RecentMessage } from "./imap.js";
 import { fileMessages, type FileInput } from "./file-mail.js";
@@ -111,7 +112,7 @@ async function triage(msgs: RecentMessage[]): Promise<Set<number>> {
     max_tokens: 300,
     system: `You triage a family's email for their household assistant. Kids: ${kids}. Parents: Alex and Sam.
 Mark an email RELEVANT only if it is about: the kids (school, teachers, classes, activities, sports, camps, daycare, playdates, birthday invitations, health/appointments), family logistics (appointments, deliveries the family must act on, travel itineraries, reservations, household services like cleaners/repairs), or something a parent must do by a date for the household.
-NOT relevant: work email, finance/banking/investing/statements/credit, marketing and promotions, newsletters, receipts for routine purchases, social media, software/service notifications, political/charity asks, personal correspondence with no household action.
+NOT relevant: work email — including anything about a parent's own job or workplace (${Object.entries(CONFIG.workplaces).map(([p, w]) => `${p === "alex" ? "Alex" : "Sam"}: ${w.org}, ${w.domains.join("/")}`).join("; ")}): meetings and events at their workplace, colleagues' mail — finance/banking/investing/statements/credit, marketing and promotions, newsletters, receipts for routine purchases, social media, software/service notifications, political/charity asks, personal correspondence with no household action.
 Reply with ONLY a JSON array of the relevant indices, e.g. [0,3]. Empty array if none.`,
     messages: [{ role: "user", content: lines.join("\n") }],
   });

@@ -9,6 +9,8 @@ import { KIDS } from "../../src/data/kids.js";
 const todayLocal = () => new Intl.DateTimeFormat("en-CA", { timeZone: CONFIG.calendar.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
 import { applyMetadata } from "./metadata.js";
 import { trustedSender } from "./senders.js";
+import { inviteOf, routeTodo, holdTodo, mergeInvite } from "./invites.js";
+import { onCalendar } from "../../src/data/invites.js";
 import { esc } from "./http.js";
 import { sendEmail } from "./email.js";
 import type { RawMessage } from "./imap.js";
@@ -136,7 +138,10 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
       if (existingEvents.includes(target) && Object.keys(set).length && !updatedEvents.includes(target)) updatedEvents.push(target);
     }
 
+    // Where each of this message's events landed (new, or merged into one already filed): prep to-dos follow it.
+    const placed: (CalEvent | undefined)[] = [];
     c.events.forEach((e, i) => {
+      const invite = inviteOf(e);
       const candidate: CalEvent = {
         id: `evt-${m.key}-${i}`,
         title: e.title,
@@ -153,22 +158,30 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
         prep: e.prep,
         source: c.source,
         commId,
+        ...(invite ? { invite } : {}),
       };
       // A similar event already on the calendar → update it in place.
       const match = existingEvents.find((ex) => eventsSimilar(ex, candidate)) || newEvents.find((ex) => eventsSimilar(ex, candidate));
       if (match) {
         mergeEventDetails(match, candidate);
+        mergeInvite(match, candidate);
         eventIds.push(match.id);
+        placed[i] = match;
         if (existingEvents.includes(match) && !updatedEvents.includes(match)) updatedEvents.push(match);
         return;
       }
       eventIds.push(candidate.id);
+      placed[i] = candidate;
       newEvents.push(candidate);
     });
+    const invitationsHere = c.events.some((e) => e.invitation);
 
     // Dates of the events this message is about: prep to-dos must land before them.
     const eventDates = [...existingEvents, ...newEvents].filter((e) => eventIds.includes(e.id)).map((e) => e.date);
     c.todos.forEach((t, i) => {
+      // Prep for an invitation waits for a yes; "decide / RSVP" to-dos for one aren't made (they're asked).
+      const route = routeTodo(t, (k) => placed[k], invitationsHere, placed);
+      if (route === "drop") return;
       const ownerSrc = Array.isArray(t.owner) && t.owner.length ? t.owner : c.owner;
       const todo: Todo = adjustPrepDue(
         {
@@ -185,6 +198,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
         },
         eventDates
       );
+      if (route !== "create") return holdTodo(route, todo);
       // Same task already open (from another email or a calendar entry) → link, don't duplicate.
       const dup = [...existingTodos, ...newTodos].find((x) => !x.done && todosSimilar(x, todo));
       if (dup) {
@@ -226,6 +240,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
 
   for (const evt of newEvents) {
     try {
+      if (!onCalendar(evt)) continue; // an invitation waits for a decision
       const gcalId = await createCalendarEvent(evt, { silent: opts.quiet });
       if (gcalId) evt.gcalId = gcalId;
     } catch (e) {
@@ -234,7 +249,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   }
   for (const evt of updatedEvents) {
     try {
-      if (!onSharedCalendar(evt)) continue;
+      if (!onSharedCalendar(evt) || !onCalendar(evt)) continue;
       const gcalId = await updateCalendarEvent(evt);
       if (gcalId) evt.gcalId = gcalId;
     } catch (e) {

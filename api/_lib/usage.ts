@@ -6,7 +6,7 @@ import { redis } from "./db.js";
 // Read it with `npx tsx scripts/usage-report.ts`.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type UsageSite = "chat" | "browser" | "classify" | "classify_pdf" | "verify" | "receipts" | "triage" | "guard";
+export type UsageSite = "chat" | "browser" | "classify" | "classify_pdf" | "verify" | "receipts" | "triage" | "guard" | "workholds";
 
 interface UsageLike {
   input_tokens?: number | null;

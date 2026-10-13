@@ -2,11 +2,12 @@ import { localSkip } from "./sandbox.js";
 import { google, calendar_v3 } from "googleapis";
 import { CONFIG } from "../../src/data/config.js";
 import { utcToWall } from "../../src/data/tz.js";
+import { onCalendar } from "../../src/data/invites.js";
 import { htmlToText } from "../../src/data/text.js";
 import { extractLinks, type Link } from "./links.js";
 import { redis } from "./db.js";
 import { seal, unseal, type Sealed } from "./vault.js";
-import { titlesSimilar, nextDay, prevDay } from "./util.js";
+import { titlesSimilar, startsDiffer, nextDay, prevDay } from "./util.js";
 import type { CalEvent } from "../../src/data/types";
 
 // Google Calendar sync using a stored OAuth refresh token (saved in KV during the
@@ -56,8 +57,10 @@ function buildBody(evt: CalEvent): calendar_v3.Schema$Event {
 
 export async function createCalendarEvent(
   evt: CalEvent,
-  opts?: { silent?: boolean }
+  opts?: { silent?: boolean; onLinked?: (title: string) => void }
 ): Promise<string | null> {
+  // An invitation the family hasn't said yes to never reaches the calendar, whoever calls this.
+  if (!onCalendar(evt)) return null;
   if (localSkip("Google Calendar: createCalendarEvent")) return null;
   const cal = await getCal();
   if (!cal) return null;
@@ -71,10 +74,19 @@ export async function createCalendarEvent(
       singleEvents: true,
       maxResults: 50,
     });
+    // Never a repeating event (a routine is never the one-off being filed, and linking to it means
+    // every later edit rewrites that week's occurrence), and never one at a different time.
     const dup = (sameDay.data.items || []).find(
-      (e) => (e.start?.dateTime || e.start?.date || "").slice(0, 10) === evt.date && titlesSimilar(e.summary || "", evt.title)
+      (e) =>
+        !e.recurringEventId &&
+        (e.start?.dateTime || e.start?.date || "").slice(0, 10) === evt.date &&
+        titlesSimilar(e.summary || "", evt.title) &&
+        !startsDiffer(e.start?.dateTime ? utcToWall(new Date(e.start.dateTime), CONFIG.calendar.timeZone).time : undefined, evt.allDay ? undefined : evt.start)
     );
-    if (dup) return dup.id ?? null;
+    if (dup) {
+      opts?.onLinked?.(dup.summary || "");
+      return dup.id ?? null;
+    }
   } catch {
     /* fall through and create */
   }
@@ -88,11 +100,25 @@ export async function createCalendarEvent(
 }
 
 export async function updateCalendarEvent(evt: CalEvent, opts?: { silent?: boolean }): Promise<string | null> {
+  if (!onCalendar(evt)) return evt.gcalId ?? null;
   if (localSkip("Google Calendar: updateCalendarEvent")) return null;
   const cal = await getCal();
   if (!cal) return null;
   // No gcalId yet → create it now.
   if (!evt.gcalId) return createCalendarEvent(evt, opts);
+  // An event the family put on Google Calendar themselves (mirrored into the app): change only
+  // its title, time, and place. Never its guests or description, and never anyone's inbox. (A
+  // whole-event update could add guests to it or email them.) For one
+  // occurrence of a repeating event, that occurrence alone.
+  if (evt.source === "calendar") {
+    const { summary, location, start, end } = buildBody(evt);
+    try {
+      await cal.events.patch({ calendarId: CONFIG.calendar.targetCalendarId, eventId: evt.gcalId, sendUpdates: "none", requestBody: { summary, location, start, end } });
+    } catch (e) {
+      console.error("calendar patch failed", (e as Error)?.message);
+    }
+    return evt.gcalId;
+  }
   try {
     await cal.events.update({
       calendarId: CONFIG.calendar.targetCalendarId,

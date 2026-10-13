@@ -107,6 +107,22 @@ export interface Comm {
   todoIds?: string[];
 }
 
+export interface Invite {
+  status: "pending" | "yes" | "no" | "expired";
+  /** RSVP deadline, if any (YYYY-MM-DD). */
+  rsvpBy?: string;
+  /** How to RSVP: a link, an email address, or instructions. */
+  rsvp?: string;
+  /** When Kimi asked the parents about it (urgent ask or the morning roundup). */
+  askedAt?: string;
+  decidedBy?: string; // a member, or "facts" (the household said they skip this kind)
+  decidedAt?: string;
+  /** Who's going (family ids or names), from a yes. */
+  going?: string[];
+  /** Prep to-dos waiting for a yes (gift, treats…). */
+  heldTodos?: { title: string; detail?: string; due?: string; priority: "normal" | "high"; owner?: string[]; people?: string[] }[];
+}
+
 export interface CalEvent {
   id: string;
   title: string;
@@ -130,6 +146,14 @@ export interface CalEvent {
   commId?: string;
   /** Google Calendar event id once synced. */
   gcalId?: string;
+  /** An occurrence of a repeating Google Calendar event: the series it belongs to. */
+  seriesId?: string;
+  /**
+   * Something the family is INVITED to (a party, a district meeting, an info night): it waits for
+   * a parent's decision before it goes on the calendar, gets prep to-dos, or is RSVP'd.
+   * Absent = a fixed date (no school, a scheduled game, an appointment).
+   */
+  invite?: Invite;
   /** Estimated drive from home in minutes (set by the travel stage for events with a location). */
   travelMin?: number;
   /** The location string travelMin was computed for — recomputed when the location changes. */

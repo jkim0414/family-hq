@@ -1,5 +1,9 @@
 import ical from "node-ical";
 import { redis } from "./db.js";
+import Anthropic from "@anthropic-ai/sdk";
+import { recordUsage } from "./usage.js";
+
+const judge = new Anthropic();
 import { CONFIG } from "../../src/data/config.js";
 import { safeFetch } from "./links.js";
 import { getCal } from "./calendar.js";
@@ -32,6 +36,70 @@ export interface WorkBlock {
   travel: boolean;
   /** A flight or airport run — the parent is on a trip, not at the office. */
   trip?: boolean;
+  /** An attendee-less entry Kimi isn't sure about (treated as busy; she asks the parent). */
+  unsure?: boolean;
+}
+
+// ── Holds or commitments? ────────────────────────────────────────────────────
+// For some parents (CONFIG.judgeAttendeeless) an entry with no other attendees is often a real
+// commitment (a standing meeting, a shift), not a self-placed hold. Each title is judged once (a small
+// model), and the parent's own answer — asked in their private chat when unsure — always wins.
+export type BlockKind = "commitment" | "hold" | "unsure";
+interface KindRecord { kind: BlockKind; by: "model" | "parent"; askedAt?: string }
+const kindKey = (p: Parent) => `workhold:${p}`;
+export const normTitle = (t: string) => t.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 120);
+
+export async function getBlockKinds(p: Parent): Promise<Record<string, KindRecord>> {
+  return ((await redis.hgetall<Record<string, KindRecord>>(kindKey(p)).catch(() => null)) || {}) as Record<string, KindRecord>;
+}
+export async function setBlockKind(p: Parent, title: string, kind: "commitment" | "hold"): Promise<void> {
+  await redis.hset(kindKey(p), { [normTitle(title)]: { kind, by: "parent" } satisfies KindRecord });
+  const keys = await redis.keys(`workcal_cache:${p}:*`).catch(() => [] as string[]);
+  if (keys.length) await redis.del(...keys);
+}
+export async function markBlocksAsked(p: Parent, titles: string[]): Promise<void> {
+  const kinds = await getBlockKinds(p);
+  const at = new Date().toISOString();
+  const upd: Record<string, KindRecord> = {};
+  for (const t of titles) { const k = kinds[normTitle(t)]; if (k) upd[normTitle(t)] = { ...k, askedAt: at }; }
+  if (Object.keys(upd).length) await redis.hset(kindKey(p), upd);
+}
+
+async function judgeTitles(p: Parent, titles: string[]): Promise<Record<string, BlockKind>> {
+  if (!titles.length) return {};
+  const work = CONFIG.workplaces[p];
+  const res = await judge.messages.create({
+    model: "claude-haiku-4-5",
+    max_tokens: 1500,
+    messages: [{ role: "user", content: `${p === "sam" ? "Sam" : "Alex"} works at ${work?.org || "their job"}. These entries on their work calendar have no other attendees. For each, decide: "commitment" (somewhere they must be or something scheduled with others: a standing meeting, a shift, a class, a duty, a committee, an event), "hold" (a block they place for themselves and can move: focus/prep time, lunch, travel, email, a reminder), or "unsure".\nTitles:\n${titles.map((t, i) => `${i}. ${t}`).join("\n")}\nReply with JSON only: {"0":"commitment", "1":"hold", ...}` }],
+  });
+  recordUsage("workholds", "claude-haiku-4-5", res.usage);
+  const text = res.content.find((b) => b.type === "text")?.text || "{}";
+  let j: Record<string, string> = {};
+  try { j = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)); } catch { /* all unsure */ }
+  return Object.fromEntries(titles.map((t, i) => [t, (["commitment", "hold"].includes(j[String(i)]) ? j[String(i)] : "unsure") as BlockKind]));
+}
+
+/** Apply the judgment to a parent's attendee-less entries (judging new titles once). */
+async function judgeHolds(p: Parent, blocks: WorkBlock[]): Promise<WorkBlock[]> {
+  if (!CONFIG.judgeAttendeeless.includes(p)) return blocks;
+  const candidates = blocks.filter((b) => b.hold && !b.trip && !b.travel && !b.outOfOffice && b.title && b.title !== "Busy");
+  if (!candidates.length) return blocks;
+  const kinds = await getBlockKinds(p);
+  const fresh = [...new Set(candidates.map((b) => b.title))].filter((t) => !kinds[normTitle(t)]).slice(0, 40);
+  if (fresh.length) {
+    const judged = await judgeTitles(p, fresh).catch(() => ({}) as Record<string, BlockKind>);
+    const upd: Record<string, KindRecord> = {};
+    for (const t of fresh) upd[normTitle(t)] = { kind: judged[t] || "unsure", by: "model" };
+    await redis.hset(kindKey(p), upd).catch(() => {});
+    Object.assign(kinds, upd);
+  }
+  for (const b of candidates) {
+    const k = kinds[normTitle(b.title)]?.kind;
+    if (k === "commitment") b.hold = false;
+    else if (k === "unsure") { b.hold = false; b.unsure = true; }
+  }
+  return blocks;
 }
 
 const TRAVEL_RE = /\b(travel|commute|commuting|drive|driving|train|transit|to the office|to office)\b/i;
@@ -145,7 +213,7 @@ export async function getWorkBlocks(p: Parent, from: Date, to: Date): Promise<Wo
   const key = `workcal_cache:${p}:${from.toISOString().slice(0, 13)}:${to.toISOString().slice(0, 13)}`;
   const cached = await redis.get<WorkBlock[]>(key).catch(() => null);
   if (cached) return cached;
-  const blocks = cfg.source === "google" ? await readGoogle(cfg.id, from, to) : await readIcs(cfg.id, from, to);
+  const blocks = await judgeHolds(p, cfg.source === "google" ? await readGoogle(cfg.id, from, to) : await readIcs(cfg.id, from, to));
   await redis.set(key, blocks, { ex: CACHE_S }).catch(() => {});
   return blocks;
 }
@@ -160,13 +228,13 @@ export function formatBlocks(blocks: WorkBlock[], opts: { availabilityOnly?: boo
   // Availability-only still says enough to plan around: where a trip is to (the airport code — not
   // a meeting name), and that the whole day is a travel day, so "blocked" holds around it read right.
   const where = (b: WorkBlock) => [...new Set(b.title.match(AIRPORT_RE) || [])].slice(0, 2).join("/");
-  const label = (b: WorkBlock) => (b.outOfOffice ? "out of office" : b.trip ? `traveling${where(b) ? ` (${where(b)} trip)` : ""}` : b.travel ? "commute (office day)" : b.hold ? "blocked" : "busy");
+  const label = (b: WorkBlock) => (b.outOfOffice ? "out of office" : b.trip ? `traveling${where(b) ? ` (${where(b)} trip)` : ""}` : b.travel ? "commute (office day)" : b.hold ? "blocked" : b.unsure ? "busy (maybe movable)" : "busy");
   const byDay = new Map<string, string[]>();
   for (const b of blocks) {
     const s = utcToWall(new Date(b.start), HOME_TZ);
     const e = utcToWall(new Date(b.end), HOME_TZ);
     const day = b.allDay ? b.start.slice(0, 10) : s.date;
-    const tag = b.outOfOffice ? " (OUT)" : b.trip ? " (hold: trip travel)" : b.travel ? " (hold: commute — office day)" : b.hold ? " (hold)" : "";
+    const tag = b.outOfOffice ? " (OUT)" : b.trip ? " (hold: trip travel)" : b.travel ? " (hold: commute — office day)" : b.hold ? " (hold)" : b.unsure ? " (no attendees — commitment or movable? unsure)" : "";
     const what = opts.availabilityOnly ? label(b) : `${b.title}${tag}`;
     const line = b.allDay ? `all day — ${what}` : `${fmt12(s.time)}–${fmt12(e.time)} ${what}`;
     (byDay.get(day) || byDay.set(day, []).get(day)!).push(line);

@@ -1,5 +1,5 @@
 import { getCollection, setCollection, redis } from "./db.js";
-import { memberName } from "./privacy.js";
+import { memberName, privateThreadId, threadMembers } from "./privacy.js";
 import { HOME_TZ } from "../../src/data/tz.js";
 import { nextDate, computeNextRun, describe, todayHome, nowHomeTime, addDays } from "../../src/data/schedule.js";
 import type { Schedule, Repeat, Channel, Member } from "../../src/data/types";
@@ -83,7 +83,9 @@ export async function createSchedule(input: NewSchedule): Promise<Schedule> {
     owner: input.owner,
     notify: input.notify === "both" ? "both" : "owner",
     channel: input.channel,
-    thread: input.thread,
+    // A result for one person runs in that person's private chat, even when it was set up in a
+    // shared one: it's texted to them alone, and the shared chat shouldn't show a message meant for them.
+    thread: input.notify !== "both" && input.thread && threadMembers(input.thread).length > 1 ? privateThreadId(input.owner) : input.thread,
     privateTo: input.privateTo,
     audience: input.audience,
     time,

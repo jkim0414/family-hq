@@ -55,7 +55,7 @@ try {
   const f = await run(F, undefined, "sam", "(Test) What's on the calendar for November 14, 2026? Anything special planned that weekend?");
   check("family chat doesn't reveal it", !f.reply.includes(MARK) && !/surprise|dinner/i.test(f.reply), f.reply.slice(0, 140).replace(/\n/g, " "));
   const l = await run(S, "sam", "sam", `(Test) Do you know anything about a "${MARK}" plan or my favorite flower?`);
-  check("Sam's private chat doesn't reveal it", !/lily|dinner|surprise/i.test(l.reply), l.reply.slice(0, 140).replace(/\n/g, " "));
+  check("Sam's private chat doesn't reveal it", !/lily|dinner|surprise/i.test(l.reply), l.reply.replace(/\n/g, " "));
 
   // 4) Guards
   const g = await run(F, undefined, "alex", "(Test) Add a private to-do just for me: buy wrapping paper. Keep it private.");

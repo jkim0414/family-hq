@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { getCollection, setCollection } from "../_lib/db.js";
+import { getCollection, setCollection, addAudit } from "../_lib/db.js";
 import { json } from "../_lib/http.js";
 import { requireUser } from "../_lib/auth.js";
 import { canSee } from "../_lib/privacy.js";
@@ -20,6 +20,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!t) return json(res, 404, { error: "not found" });
     t.done = done;
     await setCollection("todos", todos);
+    // On the record: who checked what off, and when (it's how a "I'm sure I checked it" gets answered).
+    await addAudit({ kind: "executed", summary: `${done ? "Checked off" : "Reopened"} “${t.title}”`, by: user.id, privateTo: t.privateTo, audience: t.audience } as any).catch(() => {});
     json(res, 200, { ok: true, todo: t });
   } catch (err) {
     json(res, 500, { error: String(err) });

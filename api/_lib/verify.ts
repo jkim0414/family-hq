@@ -15,9 +15,10 @@ const VERIFIABLE: { kind: "rsvp" | "signup"; title: RegExp; confirm: RegExp; que
   {
     kind: "rsvp",
     title: /^\s*rsvp\b/i,
-    confirm: /you('| a)re (confirmed|attending|going)|rsvp (confirmed|received|sent|recorded)|thanks for (your )?rsvp|you replied|your rsvp|response (sent|recorded)|you('| ha)ve rsvp'?d/i,
+    // A ticket or registration confirmation counts as the RSVP (a ticketed fundraiser, say).
+    confirm: /you('| a)re (confirmed|attending|going|registered)|rsvp (confirmed|received|sent|recorded)|thanks for (your )?(rsvp|registering|registration)|you replied|your rsvp|response (sent|recorded)|you('| ha)ve rsvp'?d|your tickets?\b|tickets? (confirmed|purchased)|purchased (a|your) tickets?|registration (confirmed|complete|received)|order (confirmed|confirmation)/i,
     // (A Google Calendar "Accepted:" notice is not an RSVP to the host — not counted.)
-    query: (key) => `("${key}") (rsvp OR confirmed OR attending OR "you're going" OR "your response") -subject:accepted`,
+    query: (key) => `("${key}") (rsvp OR confirmed OR attending OR "you're going" OR "your response" OR ticket OR tickets OR registered OR registration) -subject:accepted`,
   },
   {
     kind: "signup",

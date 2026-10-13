@@ -118,6 +118,12 @@ try {
   // ── Senders are who their address says ──
   check("a display name can't claim to be the school", !trustedSender(`"mybrightwheel.com" <attacker@example.com>`) && !trustedSender("x@mybrightwheel.com.example.com") && trustedSender("Teacher <t@mybrightwheel.com>"));
 
+  // ── Calendar matching: different events must never be linked (edits would overwrite the other) ──
+  const { titlesSimilar, eventsSimilar } = await import("../api/_lib/util");
+  check("a parenthetical doesn't make two events the same", !titlesSimilar("Book Fair (after the Spring Concert)", "Spring Concert"));
+  check("…nor do different start times on the same day", !eventsSimilar({ date: "2027-04-17", title: "Spring Concert", start: "18:00" }, { date: "2027-04-17", title: "Spring Concert + Book Fair", start: "18:30" }));
+  check("…while real duplicates still match", eventsSimilar({ date: "2026-11-25", title: "Thanksgiving Break" }, { date: "2026-11-23", endDate: "2026-11-27", title: "Thanksgiving Break — No School" }) && eventsSimilar({ date: "2027-05-01", title: "Max's Soccer Game", start: "10:00" }, { date: "2027-05-01", title: "Soccer game (Max)", start: "10:00" }) && titlesSimilar("Picture Day", "MGE Picture Day"));
+
   // ── File pages ──
   const html = renderFile({ id: "f-x", title: "t", markdown: `hi <script>alert(1)</script> <form action="https://evil"><input name=p></form> [x](javascript:alert(1))`, updatedAt: new Date().toISOString(), createdAt: new Date().toISOString() } as any);
   check("file pages show raw HTML as text and drop script links", !/<script|<form|javascript:/i.test(html));
