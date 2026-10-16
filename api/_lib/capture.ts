@@ -129,7 +129,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
   const eventsCtx = upcoming.length
     ? "EXISTING EVENTS (id | date time | title @ location):\n" +
       upcoming
-        .map((e) => `${e.id} | ${e.date} ${e.allDay ? "all-day" : e.start || ""} | ${e.title}${e.location ? ` @ ${e.location}` : ""}`)
+        .map((e) => `${e.id} | ${e.date} ${e.allDay ? "all-day" : `${e.start || ""}${e.end ? `–${e.end}` : ""}`} | ${e.title}${e.location ? ` @ ${e.location}` : ""}`)
         .join("\n")
     : "";
   const openTodos = existingTodos.filter((t) => !t.done).slice(0, 60);
@@ -290,7 +290,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
       startTz: e.startTz,
       endTz: e.endTz,
       allDay: e.allDay,
-      people: c.people,
+      people: e.people?.length ? e.people : c.people,
       owner: c.owner,
       location: e.location,
       prep: e.prep,

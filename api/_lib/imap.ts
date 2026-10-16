@@ -20,10 +20,15 @@ export interface RawMessage {
   links?: Link[];
 }
 
-/** Plain text of a message (HTML-only mail is converted), plus its links. */
+/**
+ * Plain text of a message (HTML-only mail is converted), plus its links. Long enough for a whole
+ * digest or newsletter (they can run to tens of thousands of characters, mostly tracking links).
+ */
+const BODY_MAX = 100_000;
 export function bodyOf(parsed: { text?: string; html?: string | false }): { text: string; links: Link[] } {
   const html = typeof parsed.html === "string" ? parsed.html : "";
-  const text = (parsed.text || (html ? htmlToText(html.replace(/<style[\s\S]*?<\/style>/gi, " ")) : "")).trim().slice(0, 8000);
+  const full = (parsed.text || (html ? htmlToText(html.replace(/<style[\s\S]*?<\/style>/gi, " ")) : "")).trim();
+  const text = full.length > BODY_MAX ? `${full.slice(0, BODY_MAX)}\n[… ${full.length - BODY_MAX} more characters not shown]` : full;
   return { text, links: extractLinks(parsed.text || "", html) };
 }
 

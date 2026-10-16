@@ -129,6 +129,24 @@ export function mergeEventDetails(target: any, src: any): void {
   if (src.date) target.date = src.date;
   if (src.people?.length) target.people = src.people;
   if (src.owner?.length) target.owner = src.owner;
+  settleTimes(target);
+}
+
+/**
+ * An event with a start time is a timed event (a later message can add a start time to an
+ * all-day entry; it must stop being all-day). With no end, or one at/before the start: an hour,
+ * the calendar's usual default, until something says otherwise.
+ */
+export function settleTimes(e: { start?: string; end?: string; endDate?: string; date?: string; allDay?: boolean }): void {
+  if (!e.start) return;
+  e.allDay = false;
+  if (!e.endDate || e.endDate === e.date) {
+    if (!e.end || e.end <= e.start) {
+      const [h, m] = e.start.split(":").map(Number);
+      const t = Math.min(h * 60 + m + 60, 23 * 60 + 59);
+      e.end = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+    }
+  }
 }
 
 /**

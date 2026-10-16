@@ -7,6 +7,7 @@ const judge = new Anthropic();
 import { CONFIG } from "../../src/data/config.js";
 import { safeFetch } from "./links.js";
 import { getCal } from "./calendar.js";
+import type { calendar_v3 } from "googleapis";
 import { utcToWall, fmt12, HOME_TZ } from "../../src/data/tz.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,6 +39,12 @@ export interface WorkBlock {
   trip?: boolean;
   /** An attendee-less entry Kimi isn't sure about (treated as busy; she asks the parent). */
   unsure?: boolean;
+  /** Where it is, as written on the invite (a room, an address, a neighborhood). */
+  location?: string;
+  /** Has a video link (can be joined from anywhere). */
+  video?: boolean;
+  /** A hold Kimi placed for a family event (workholds.ts) — the event itself, not something else. */
+  kimiHold?: boolean;
 }
 
 // ── Holds or commitments? ────────────────────────────────────────────────────
@@ -135,6 +142,9 @@ export function parseWorkCalInput(raw: string): WorkCalConfig | null {
   return null;
 }
 
+/** The place, without meeting links (those just mean "video", and carry passcodes). */
+const placeOf = (loc?: string | null): string => String(loc || "").replace(/https?:\/\/\S+/g, "").replace(/^[\s,;]+|[\s,;]+$/g, "").replace(/\s*[,;]\s*[,;]\s*/g, ", ").slice(0, 120);
+const VIDEO_RE = /\b(zoom\.us|meet\.google\.com|teams\.microsoft\.com|webex\.com)\b/i;
 // "Leave for PTA meeting" is a departure, not time off — only unambiguous phrases count.
 const OOO_RE = /\b(ooo|out of (the )?office|vacation|pto|holiday|day off|days off|off work|on leave|parental leave|maternity leave|paternity leave|sick day|sick leave)\b/i;
 
@@ -142,8 +152,15 @@ async function readGoogle(id: string, from: Date, to: Date): Promise<WorkBlock[]
   const cal = await getCal();
   if (!cal) throw new Error("Google Calendar isn't connected");
   try {
-    const res = await cal.events.list({ calendarId: id, timeMin: from.toISOString(), timeMax: to.toISOString(), singleEvents: true, orderBy: "startTime", maxResults: 250 });
-    return (res.data.items || [])
+    // A busy calendar runs past one page (250) over a few weeks.
+    const items: calendar_v3.Schema$Event[] = [];
+    let pageToken: string | undefined;
+    do {
+      const res = await cal.events.list({ calendarId: id, timeMin: from.toISOString(), timeMax: to.toISOString(), singleEvents: true, orderBy: "startTime", maxResults: 250, pageToken });
+      items.push(...(res.data.items || []));
+      pageToken = res.data.nextPageToken || undefined;
+    } while (pageToken && items.length < 2000);
+    return items
       .filter((e) => e.status !== "cancelled" && e.transparency !== "transparent")
       .filter((e) => !(e.attendees || []).some((a) => a.self && a.responseStatus === "declined"))
       .map((e) => {
@@ -151,7 +168,8 @@ async function readGoogle(id: string, from: Date, to: Date): Promise<WorkBlock[]
         const title = e.summary || "Busy";
         // Anyone besides this calendar's owner (and meeting rooms) makes it a meeting.
         const others = (e.attendees || []).filter((a) => !a.self && !a.resource && a.email?.toLowerCase() !== id.toLowerCase());
-        const hold = others.length === 0;
+        const kimiHold = Object.values(CONFIG.workHolds).some((h) => h.calendarId === e.organizer?.email);
+        const hold = others.length === 0 || kimiHold;
         return {
           start: e.start?.dateTime || `${e.start?.date}T00:00:00`,
           end: e.end?.dateTime || `${e.end?.date}T00:00:00`,
@@ -159,6 +177,9 @@ async function readGoogle(id: string, from: Date, to: Date): Promise<WorkBlock[]
           title,
           outOfOffice: e.eventType === "outOfOffice" || (allDay && OOO_RE.test(title)),
           ...classify(title, hold),
+          ...(kimiHold ? { kimiHold: true } : {}),
+          ...(placeOf(e.location) ? { location: placeOf(e.location) } : {}),
+          ...(e.hangoutLink || e.conferenceData?.entryPoints?.length || VIDEO_RE.test(`${e.location || ""} ${e.description || ""}`) ? { video: true } : {}),
         };
       });
   } catch (e: any) {
@@ -192,7 +213,8 @@ async function readIcs(url: string, from: Date, to: Date): Promise<WorkBlock[]> 
     const push = (s: Date) => {
       const end = new Date(+s + dur);
       if (end < from || s > to) return;
-      out.push({ start: s.toISOString(), end: end.toISOString(), allDay, title, outOfOffice: allDay && OOO_RE.test(title), ...classify(title, hold) });
+      const loc = typeof e.location === "string" ? e.location : (e.location as any)?.val;
+      out.push({ start: s.toISOString(), end: end.toISOString(), allDay, title, outOfOffice: allDay && OOO_RE.test(title), ...classify(title, hold), ...(placeOf(loc) ? { location: placeOf(loc) } : {}), ...(VIDEO_RE.test(`${loc || ""} ${typeof e.description === "string" ? e.description : ""}`) ? { video: true } : {}) });
     };
     if (e.rrule) {
       const skip = new Set(Object.keys(e.exdate || {}).map((k) => new Date(k).toDateString()));
@@ -234,8 +256,9 @@ export function formatBlocks(blocks: WorkBlock[], opts: { availabilityOnly?: boo
     const s = utcToWall(new Date(b.start), HOME_TZ);
     const e = utcToWall(new Date(b.end), HOME_TZ);
     const day = b.allDay ? b.start.slice(0, 10) : s.date;
-    const tag = b.outOfOffice ? " (OUT)" : b.trip ? " (hold: trip travel)" : b.travel ? " (hold: commute — office day)" : b.hold ? " (hold)" : b.unsure ? " (no attendees — commitment or movable? unsure)" : "";
-    const what = opts.availabilityOnly ? label(b) : `${b.title}${tag}`;
+    const tag = b.kimiHold ? " (a hold you placed for a family event)" : b.outOfOffice ? " (OUT)" : b.trip ? " (hold: trip travel)" : b.travel ? " (hold: commute — office day)" : b.hold ? " (hold)" : b.unsure ? " (no attendees — commitment or movable? unsure)" : "";
+    const place = [b.location ? `at ${b.location}` : "", b.video ? "video link" : ""].filter(Boolean).join(", ");
+    const what = opts.availabilityOnly ? label(b) : `${b.title}${tag}${place ? ` [${place}]` : ""}`;
     const line = b.allDay ? `all day — ${what}` : `${fmt12(s.time)}–${fmt12(e.time)} ${what}`;
     (byDay.get(day) || byDay.set(day, []).get(day)!).push(line);
   }

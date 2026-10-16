@@ -4,6 +4,7 @@ import { renderFacts } from "../../src/data/facts.js";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Attachment } from "./imap.js";
 import { PREP_CONVENTIONS, NAME_COLLISIONS } from "./conventions.js";
+import { settleTimes } from "./util.js";
 import type { Category, Source, HouseholdProfile } from "../../src/data/types";
 
 /** Compact household-profile summary injected so the model can infer to-dos. */
@@ -18,6 +19,15 @@ export function profileContext(p?: HouseholdProfile | null, opts: { withIds?: bo
     : "";
   const head = opts.withIds ? "HOUSEHOLD FACTS (use them to plan ahead; [ids] are for remember's replaces):" : "HOUSEHOLD PROFILE (use to infer associated to-dos):";
   return [head, secs, ppl].filter(Boolean).join("\n");
+}
+
+/** The kids as they are now (grade, school, teachers) — from the family's data, not a copy here that goes stale. */
+async function kidsRoster(): Promise<string> {
+  const { getCollection } = await import("./db.js");
+  const kids = await getCollection("kids").catch(() => []);
+  return kids
+    .map((k) => `- ${k.id} — kid, born ${k.dob.slice(0, 4)}. ${k.current.school}, ${k.current.program}${k.current.teachers.length ? ` (${k.current.teachers.join(", ")})` : ""}.${k.current.aftercare ? ` After school: ${k.current.aftercare}.` : ""}`)
+    .join("\n");
 }
 
 const anthropic = new Anthropic(); // reads ANTHROPIC_API_KEY
@@ -42,6 +52,7 @@ export interface Classification {
     endDate?: string; // YYYY-MM-DD if end falls on a different date (e.g. a red-eye)
     startTz?: string; // IANA tz of start (e.g. departure airport)
     endTz?: string; // IANA tz of end (e.g. arrival airport)
+    people?: string[]; // who this event is for, when narrower than the message's
     location?: string;
     prep?: string;
     /** Something the family is invited to and chooses whether to attend (see INVITATIONS). */
@@ -95,12 +106,10 @@ export interface Classification {
 // Family roster + rubric. Kept stable so it can be prompt-cached across calls.
 const SYSTEM = `You are the operations assistant for the family. You triage everything that comes in — forwarded emails, app attachments, and quick notes the parents type — and decide what (if anything) needs to surface, who it concerns, and what to do about it. Be precise and conservative: the parents are busy and only want to be interrupted when something genuinely needs them.
 
-THE FAMILY (ids; add guests by their name as free text, e.g. "Grandma"). EDIT THIS for your family:
+THE FAMILY (ids; add guests by their name as free text, e.g. "Grandma"). EDIT the parents for your family; the kids come from the family's data:
 - alex — parent
 - sam — parent (Alex's partner)
-- max — kid. Maple Grove Elementary, 3rd grade (Ms. Rivera). After school: Maple Grove After-School.
-- theo — kid. Maple Grove Elementary, kindergarten (Mr. Okafor). After school: Maple Grove After-School.
-- ava — kid. Sunny Days Preschool (Ms. Priya, Ms. Dana).
+{{KIDS}}
 
 PARENTS' WORK IS NOT FAMILY BUSINESS: ${Object.entries(CONFIG.workplaces).map(([p, w]) => `${p} works at ${w.org} (${w.domains.join(", ")})`).join("; ")}. A parent's own job — meetings, events at their workplace (even ones that look like family events, like a family night held at their workplace), colleagues' mail — is category fyi with NO events and NO to-dos, unless it changes the kids' logistics (then only a to-do about coverage).
 
@@ -133,6 +142,7 @@ RECONCILIATION: the message may include an "EXISTING EVENTS" list (id | date tim
 - An item in the input with NO existing event → a new entry in "events" as usual.
 - An existing event clearly belonging to the schedule's scope but absent from the authoritative input (or explicitly cancelled) → emit in "deletes" with the id and a one-line reason. Scope matters: only delete events the input is authoritative ABOUT (don't delete an unrelated dentist appointment because a sports schedule omits it). Practices/recurring routines are NOT in scope of a games-only schedule.
 - Never create a new event AND an update for the same input row — pick one.
+- The organizer's own word beats what's filed: when the message (a principal's or teacher's newsletter, the host's note, the league) states a time, end time, or place for an event already in EXISTING EVENTS and it differs — even by a few minutes, or it adds an end time — emit an update with the stated values. Filed times are often a parent's estimate. Put timing notes that matter ("wrap up promptly", "families off campus before the drill") in prep.
 
 TABLES & SCHEDULES (flyers, PDFs, reports): scan EVERY row of EVERY page — schedules often span multiple pages. When filtering for a specific team/league, apply BOTH filters exactly (league name AND team) and check ALL columns a team can appear in (e.g. "Away - Home" → our team may be on either side; note which side for home/away context like jersey colors). Extract only rows that are actually present — NEVER invent or extrapolate rows.
 CRITICAL league check: the SAME team labels (Team A, Team B…) usually exist in EVERY division of a league (T-Ball, Minors, Majors, softball) and play at the same fields on the same days. A row only qualifies if its league/division cell matches the requested league EXACTLY, character for character — "City League Majors Baseball" is NOT "City League T-Ball Baseball" even when the team letter matches. For EACH row you extract, re-read its league cell before including it. Count your output against the source: every matching row, nothing else.
@@ -167,6 +177,8 @@ EVENTS vs TO-DOS (important — keep the calendar uncluttered):
 
 RULES:
 - Default to fyi unless there is a real action or a real date.
+- WHICH KIDS: an event for some grades, classes, or ages ("3rd–5th grade", "Preschool, TK/K", "Room 7", "upper elementary") is only for the kids in them — match each kid's grade/program in THE FAMILY (TK comes before K). Set the event's own "people" to just those kids. If none of the kids are in it, don't file it as an event (at most mention it in the summary). When the message gives times by grade or group, file ONE timed event (not one per kid, not all-day) spanning only the kids' own slots: start = the earliest of their slots, end = the start of the group after their last slot. E.g. "7:45 grades 6–8; 8:15 TK/K; 8:40 1st and 2nd; 9:05 3rd and 4th; 9:30 5th" with a kindergartner and a 3rd grader → start 08:15, end 09:30, allDay=false, people = those two, prep "TK/K 8:15 (name); 3rd & 4th 9:05 (name)". Those times ARE stated by the message — not a guess. This holds for an update to an event already filed, too. But separate ACTIVITIES on one day, each for its own grades at its own time and place ("Poetry Walk (1st/2nd) 8:45 library; Science Fair (3rd–5th) 10:15 gym; Pet Parade (TK/K) 1:30 field"), are separate events — one per activity a kid is in (with a kindergartner and a 3rd grader: the parade and the science fair; nothing for 1st/2nd) — never merged into one, and never skipped because the heading says "save the date".
+- TIMES: an event with a stated start time is never all-day. Give it an end: the stated one, or — when none is given — your best estimate of how long that kind of thing runs (a parade, assembly, or drop-in viewing ~30 min; a performance or meeting ~1 h; a party ~2 h; a game ~1 h). An all-day block is only for things with no time at all (no school, a break, a dress-up day); a timed event filed all-day hides it on the calendar and from conflict checks.
 - NEWSLETTERS AND DIGESTS BURY REAL EVENTS. Read every paragraph of a teacher post, digest, or newsletter: any dated thing the kids take part in (a parade, performance, field trip, spirit or dress-up day, picture day, class party, early dismissal) is an event to file even when the rest of the post is chit-chat, and even when details are "still being finalized" — file it all-day with what's known (never invent a time the message doesn't give), put the dress/bring rules in "prep", and note that details are to come. A message that announces such an event is category "calendar", not "fyi".
 - SCHOOL FUNDRAISER DINE-OUT NIGHTS (restaurant giveback or spirit nights) are events the family wants on the calendar: file each with the restaurant name, address (from the flyer if attached), and hours, and put how the donation counts (show the flyer, promo code, order online) in "prep".
 - MULTI-DAY: a date range (Spring Break Mar 22–26, a camp week, a trip, a visit) is ONE all-day event with date = the first day and endDate = the last day (inclusive) — not just the first day, and not one event per day. (If each day has its own times, as in a camp with daily hours, still one span; put the daily hours in prep.)
@@ -218,7 +230,8 @@ const TOOL: Anthropic.Tool = {
             date: { type: "string", description: "YYYY-MM-DD — start/departure date" },
             allDay: { type: "boolean", description: "true when the message gives no start time" },
             start: { type: "string", description: "HH:mm local to startTz — ONLY a time the message (or a linked page) actually states. Never guess one; if none is given, omit it and set allDay=true." },
-            end: { type: "string", description: "HH:mm local to endTz, optional. For a flight, the arrival time." },
+            end: { type: "string", description: "HH:mm local to endTz. For a flight, the arrival time. With a start and no stated end, your estimate of how long it runs (see TIMES)." },
+            people: { type: "array", items: { type: "string" }, description: "Who THIS event is for, when narrower than the message's people — e.g. only the kid in the grade it's for (see WHICH KIDS). Omit to use the message's." },
             endDate: {
               type: "string",
               description: "YYYY-MM-DD — the LAST day when the event spans days: a break, camp week, or trip (Spring Break Mar 22–26 → date 03-22, endDate 03-26, inclusive), or a red-eye's arrival date. Omit if it's one day.",
@@ -306,7 +319,7 @@ const TOOL: Anthropic.Tool = {
                 title: { type: "string" },
                 date: { type: "string", description: "YYYY-MM-DD" },
                 start: { type: "string", description: "HH:mm" },
-                end: { type: "string", description: "HH:mm" },
+                end: { type: "string", description: "HH:mm — with a new start and no stated end, your estimate (see TIMES)" },
                 location: { type: "string" },
                 prep: { type: "string", description: "notes (what to bring/wear, jersey color, etc.)" },
               },
@@ -397,7 +410,7 @@ ${input.text}${note}`,
     // Generous output budget: a full season schedule can be dozens of events.
     max_tokens: 8192,
     // Not cached: emails arrive minutes apart, so a cached copy was written every time and never read.
-    system: SYSTEM,
+    system: SYSTEM.replace("{{KIDS}}", await kidsRoster()),
     tools: [TOOL],
     tool_choice: { type: "tool", name: "file_item" },
     messages: [{ role: "user", content }],
@@ -427,6 +440,8 @@ ${input.text}${note}`,
       }
     }
   }
+  // A start time makes it a timed event, with an end (the model's estimate, else an hour).
+  for (const e of c.events) settleTimes(e);
   return c;
 }
 
@@ -439,7 +454,8 @@ export function timeStated(text: string, hhmm: string): boolean {
   const mm = String(m).padStart(2, "0");
   if (h === 12 && m === 0 && /\bnoon\b/.test(t)) return true;
   const ampm = "(a\\.?m\\.?|p\\.?m\\.?)";
-  const pats = [`\\b${h12}:${mm}\\b`, `\\b${String(h).padStart(2, "0")}:${mm}\\b`, `\\b${h12}\\.${mm}\\s*${ampm}`];
+  // (?!\d), not \b, after the minutes: there's no word break between "9:10" and "am".
+  const pats = [`\\b${h12}:${mm}(?!\\d)`, `\\b${String(h).padStart(2, "0")}:${mm}(?!\\d)`, `\\b${h12}\\.${mm}\\s*${ampm}`];
   if (m === 0) pats.push(`\\b${h12}\\s*${ampm}`, `\\b${h12}\\s*o'?clock`, `\\bat ${h12}\\b`, `\\b${h12}\\s*[-–—]\\s*\\d{1,2}(:\\d\\d)?\\s*${ampm}`);
   return pats.some((p) => new RegExp(p).test(t));
 }

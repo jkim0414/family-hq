@@ -20,6 +20,15 @@ export const CONFIG = {
     sam: { org: "Globex", domains: ["globex.example"] },
   } as Record<string, { org: string; domains: string[] }>,
 
+  // Work-calendar holds: a family event during a parent's working hours gets a "DNS – <event>" hold
+  // on their work calendar, so whoever books their meetings (and can't see the family calendar) works
+  // around it. Some work calendars can't be shared for editing, so the hold is an invitation to the work address from a calendar of its own in the family's Google
+  // account — kept out of the family calendar and out of the app.
+  workHolds: {
+    // EDIT: per parent, a calendar of its own in the family Google account (its Calendar ID), e.g.
+    // alex: { calendarId: "…@group.calendar.google.com", hours: ["08:00", "18:00"] },
+  } as Record<string, { calendarId: string; hours: [string, string] }>,
+
   // Whose work-calendar entries without other attendees can be real commitments (a standing meeting,
   // a shift), not just self-placed holds. Kimi judges each one, and asks them when unsure.
   judgeAttendeeless: [] as string[], // EDIT: e.g. ["alex"] for a parent whose solo calendar entries are often commitments

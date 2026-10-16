@@ -37,6 +37,8 @@ import { gmailConnected, searchGmail, readGmail } from "./gmail.js";
 import * as web from "./browser.js";
 import { readUrl } from "./links.js";
 import { getWorkCalConfig, getWorkBlocks, formatBlocks } from "./workcal.js";
+import { findConflicts, type Flag } from "./conflicts.js";
+import { syncWorkHolds, setHoldPref, holdParents, takeNewHolds } from "./workholds.js";
 import { listCredentials, getCredentialField, credentialsAvailable } from "./vault.js";
 import { listOpCards, getOpCard, opConfigured, BUSINESS_CARD_RE } from "./onepassword.js";
 import { guardCheck, pageFacts } from "./guard.js";
@@ -50,7 +52,7 @@ import type { Repeat } from "../../src/data/types";
 import { toHomeZone, homeSortKey, wallToUtc, HOME_TZ, fmt12, utcToWall } from "../../src/data/tz.js";
 import { CONFIG } from "../../src/data/config.js";
 import { shortTitle } from "../../src/data/text.js";
-import { titlesSimilar, eventsSimilar, todosSimilar, mergeEventDetails } from "./util.js";
+import { titlesSimilar, eventsSimilar, todosSimilar, mergeEventDetails, settleTimes } from "./util.js";
 import { PREP_CONVENTIONS, NAME_COLLISIONS } from "./conventions.js";
 import { REACTIONS, setReaction } from "./reactions.js";
 import { sendReactionSms, getSmsOptIn, phoneFor } from "./notify.js";
@@ -135,8 +137,8 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
       properties: {
         title: { type: "string" },
         date: { type: "string", description: "YYYY-MM-DD" },
-        start: { type: "string", description: "HH:mm (24h). Omit for all-day." },
-        end: { type: "string", description: "HH:mm (24h), optional" },
+        start: { type: "string", description: "HH:mm (24h). Anything with hours gets them — a place open 10–5 on the day they're going is 10:00–17:00. Omit (all-day) only when there's no time at all: no school, a break, a dress-up day. All-day hides it on the calendar and from conflict checks." },
+        end: { type: "string", description: "HH:mm (24h). The stated end; if none is given, your estimate of how long it runs (a parade ~30 min, a party ~2 h)." },
         endDate: { type: "string", description: "YYYY-MM-DD if a multi-day all-day span" },
         location: { type: "string" },
         notes: { type: "string", description: "What to bring/wear, confirmation numbers, details" },
@@ -487,6 +489,19 @@ const CHAT_ONLY_TOOLS: Anthropic.Messages.ToolUnion[] = [
         kind: { type: "string", enum: ["commitment", "hold"] },
       },
       required: ["who", "title", "kind"],
+    },
+  },
+  {
+    name: "set_work_hold",
+    description: `Put a "DNS – <event>" hold on a parent's work calendar for a family event, or take one down ("don't hold that one", "hold the Friday thing too"). Holds go on by themselves for family events a parent is on during their working hours; this is for exceptions. Their word sticks for that event.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        who: { type: "string", enum: ["alex", "sam"] },
+        event_id: { type: "string", description: "The family event's id (from get_upcoming)." },
+        hold: { type: "boolean", description: "true: hold it; false: take the hold down and don't put it back." },
+      },
+      required: ["who", "event_id", "hold"],
     },
   },
   {
@@ -1055,6 +1070,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         source: "other",
       };
       if (input?.private === true) keepWithin(evt, members);
+      settleTimes(evt);
       if (!evt.title || !/^\d{4}-\d{2}-\d{2}$/.test(evt.date)) return "error: title and date (YYYY-MM-DD) required";
       // Already on the calendar (from an email, the calendar mirror, or earlier in
       // chat)? Update that one instead of adding a second copy.
@@ -1104,7 +1120,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         }
       }
       await appendItems("events", [evt]);
-      return `Added${keptNote(evt)}: ${fmtEvent(evt)}${evt.gcalId ? " (on Google Calendar)" : ""}`;
+      return `Added${keptNote(evt)}: ${fmtEvent(evt)}${evt.gcalId ? " (on Google Calendar)" : ""}${caregiverHere ? "" : await conflictNote(evt)}`;
     }
     case "update_event": {
       const events = await getCollection("events");
@@ -1197,6 +1213,16 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       if (!who || !title || !kind) return "error: who, title, and kind (commitment or hold) required";
       await setBlockKind(who, title, kind);
       return `Saved: "${title}" on ${memberName(who)}'s work calendar is ${kind === "commitment" ? "a real commitment (counts as busy)" : "a movable hold"} from now on.`;
+    }
+    case "set_work_hold": {
+      const who = input?.who === "alex" || input?.who === "sam" ? (input.who as "alex" | "sam") : null;
+      if (!who || !holdParents().includes(who)) return `error: work-calendar holds are set up for ${holdParents().map(memberName).join(", ") || "no one"}`;
+      const evt = (await getCollection("events")).find((e) => e.id === input?.event_id && seeable(e));
+      if (!evt) return `error: no event with id ${input?.event_id}`;
+      await setHoldPref(who, evt.id, input?.hold === true);
+      const r = await syncWorkHolds(await getCollection("events"), { only: [evt.id] });
+      if (input?.hold === true) return r.placed.length || r.moved.length ? `Held on ${memberName(who)}'s work calendar: ${r.placed[0] || r.moved[0]}.` : `Noted — it'll be held${evt.allDay || !evt.start ? " once it has a time" : ""} (it may already be: check get_work_calendar).`;
+      return r.removed.length ? `Took the hold down from ${memberName(who)}'s work calendar and won't put it back.` : "Noted — no hold for that one.";
     }
     case "decide_invitation": {
       const ids: string[] = Array.isArray(input?.ids) ? input.ids.map(String) : [];
@@ -1527,7 +1553,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         `Subject: ${msg.subject}`,
         msg.attachments.length ? `Attachments: ${msg.attachments.join("; ")}` : "",
         "",
-        msg.text.slice(0, 6000) || "(no text body)",
+        (msg.text.length > 40000 ? `${msg.text.slice(0, 40000)}\n[… ${msg.text.length - 40000} more characters not shown]` : msg.text) || "(no text body)",
         links ? `\nLinks:\n${links}` : "",
       ].filter((x) => x !== "").join("\n"));
     }
@@ -2100,7 +2126,7 @@ export function requestFor(task: Task, parts: { fixed: string; perChat: string }
 
 // Not in the caregiver's chat: money and the parents' voice (spending, Venmo, email drafts in a
 // parent's name, the cards list). Her purchases go through a browser task a parent approves.
-const CAREGIVER_HIDDEN = new Set(["get_spending", "prepare_payment", "draft_email", "list_cards", "set_work_block_kind"]);
+const CAREGIVER_HIDDEN = new Set(["get_spending", "prepare_payment", "draft_email", "list_cards", "set_work_block_kind", "set_work_hold"]);
 
 // Chat tools a browser job never needs; leaving them out keeps every browsing step's prompt smaller.
 const BROWSER_SKIP = new Set(["remember", "save_traveler_info", "ask_grandma", "delete_events", "complete_todo", "schedule_task", "list_schedules", "cancel_schedule", "schedule_followup", "draft_email", "get_spending", "prepare_payment", "get_weather", "get_work_calendar", "list_files"]);
@@ -2126,6 +2152,7 @@ const DEFERRED: Record<string, string> = {
   ask_grandma: "ask Grandma something directly",
   stop_browser_task: "stop a background browser task",
   set_work_block_kind: "record whether a work-calendar entry is a real commitment or a movable hold",
+  set_work_hold: "put up or take down a DNS hold on a parent's work calendar for a family event",
 };
 const TOOL_SEARCH = { type: "tool_search_tool_bm25_20251119", name: "tool_search_tool_bm25" } as Anthropic.Messages.ToolUnion;
 
@@ -2568,9 +2595,9 @@ function tooLong(task: Task): boolean {
 const ROUNDUP_AT = "07:30";
 const QUIET = { from: "21:00", until: "07:30" };
 
-/** One system-started turn in a chat; returns Kimi's reply (empty: nothing to say). */
-async function systemTurn(threadId: string, owner: Member, content: string, deadlineMs: number): Promise<string> {
-  if (!(await acquireTaskLock(threadId, 240))) return "";
+/** One system-started turn in a chat; returns Kimi's reply (empty: nothing to say; null: the chat was busy). */
+async function systemTurn(threadId: string, owner: Member, content: string, deadlineMs: number): Promise<string | null> {
+  if (!(await acquireTaskLock(threadId, 240))) return null;
   try {
     const task = (await getTask(threadId)) || newTask(threadId, "Family chat", owner, "group");
     task.owner = owner;
@@ -2593,7 +2620,7 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
   if (!testing && (await redis.set(`invites_expire:${today}`, 1, { nx: true, ex: 86400 }))) out.expired = await expireInvitations(today);
   const family = (x: { id?: string; privateTo?: Member; audience?: Member[] }) => canSee(x, "family") && (!opts.only || opts.only.includes(String(x.id)));
   const quiet = now >= QUIET.from || now < QUIET.until;
-  const send = async (text: string) => {
+  const send = async (text: string | null) => {
     out.text = [out.text, text].filter(Boolean).join("\n---\n");
     if (text && opts.send !== false) await reachOut([...PARENTS], text, chat).catch((e) => console.error("invitation/roundup text failed", e));
   };
@@ -2634,6 +2661,24 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
     }
   }
 
+  // Holds on work calendars for family events in working hours (no texts: quiet hours don't matter).
+  if (!testing) {
+    try {
+      await syncWorkHolds(await getCollection("events"));
+    } catch (e) {
+      console.error("work holds failed", e);
+    }
+  }
+
+  // A family event that collides with a parent's work day.
+  if (!testing && !quiet) {
+    try {
+      await runConflictFlags(deadlineMs, { send: opts.send });
+    } catch (e) {
+      console.error("conflict check failed", e);
+    }
+  }
+
   // The morning text, once a day.
   const due = opts.force === "roundup" || (!testing && now >= ROUNDUP_AT && now < "11:00" && !!(await redis.set(`roundup:${today}`, 1, { nx: true, ex: 86400 })));
   if (!due) return out;
@@ -2643,6 +2688,7 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
   const soonTodos = todos.filter((t) => family(t) && !t.done && t.due && t.due <= addDays(today, 2)).sort((a, b) => (a.due || "").localeCompare(b.due || ""));
   const todayEvents = mine.filter((e) => onCalendar(e) && toHomeZone(e).date <= today && (e.endDate || toHomeZone(e).date) >= today);
   const sunday = new Date(`${today}T12:00:00Z`).getUTCDay() === 0;
+  const newHolds = (await Promise.all(holdParents().map(async (p) => (await takeNewHolds(p)).map((h) => `${memberName(p)}: ${h}`)))).flat();
   const week = sunday ? mine.filter((e) => onCalendar(e) && toHomeZone(e).date > today && toHomeZone(e).date <= addDays(today, 7)) : [];
   const content = [
     `[system · morning text · ${nowPT()} PT]`,
@@ -2653,6 +2699,7 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
     ...(soonTodos.length ? soonTodos.map(fmtTodo) : ["(none)"]),
     `3. Today, in one line:`,
     ...(todayEvents.length ? todayEvents.map(fmtEvent) : ["(nothing scheduled)"]),
+    ...(newHolds.length ? [`Also one line: holds you put on work calendars since yesterday, so whoever books their meetings works around them (they can say "don't hold that one"): ${newHolds.join("; ")}`] : []),
     ...(sunday ? [`4. Sunday: the week ahead, briefly (the days that matter, not every event):`, ...(week.length ? week.map(fmtEvent) : ["(quiet week)"])] : []),
     `Look up anything you need. If there's no decision, no to-do, and nothing notable today, end with NO text at all.`,
   ].join("\n");
@@ -2660,6 +2707,63 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
   await markAsked(waiting.map((e) => e.id));
   await send(reply);
   out.roundup = true;
+  return out;
+}
+
+/** For an event just added in chat: its work conflicts, to raise in the reply (then it's not texted again). */
+async function conflictNote(evt: CalEvent): Promise<string> {
+  try {
+    const { flags, save } = await findConflicts([evt], { only: [evt.id] });
+    await save();
+    const f = flags[0];
+    if (!f) return "";
+    return `\nWORK CONFLICT — tell them in your reply: what collides, exactly, and what you'd do (who's free to take it, a meeting to move or join by video, working from home, arriving late, skipping):\n  ${f.clashes.map((c) => `${memberName(c.parent)} — ${c.line}`).join("; ")}\n${f.context.split("\n").map((l) => `  ${l}`).join("\n")}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * A family event that collides with a parent's work day (see conflicts.ts): Kimi texts the parents
+ * it's for — what collides, exactly, and what she'd do about it. One text per run covers every new
+ * conflict for the same people. thread/only/send: checks only.
+ */
+export async function runConflictFlags(deadlineMs: number, opts: { thread?: string; only?: string[]; send?: boolean } = {}): Promise<{ flagged: number; text?: string }> {
+  const out: { flagged: number; text?: string } = { flagged: 0 };
+  const { flags, save } = await findConflicts(await getCollection("events"), { only: opts.only });
+  const unsent: Flag[] = [];
+  const groups = new Map<string, Flag[]>();
+  for (const f of flags) groups.set(f.to.join(","), [...(groups.get(f.to.join(",")) || []), f]);
+  for (const group of groups.values()) {
+    if (Date.now() > deadlineMs - 60_000) { unsent.push(...group); continue; }
+    const to = group[0].to;
+    const names = to.map(memberName).join(" and ");
+    const thread = opts.thread || (to.length > 1 ? MAIN_TASK_ID : privateThreadId(to[0]));
+    const whyLine = (f: Flag) =>
+      f.why === "changed"
+        ? "  UPDATE: you raised this event before; its time or who it's for has changed since — say what's different now (it may be better or worse)."
+        : f.why === "new-work"
+          ? `  NEW ON THE WORK CALENDAR since you raised this event (or checked it): ${f.fresh.map((c) => `${memberName(c.parent)} — ${c.line}`).join("; ")}. Likely booked by someone who can't see the family calendar: suggest asking them to move it, or what else would work, and offer a short note ${f.to.map(memberName).join("/")} can forward.`
+          : "";
+    const items = group.map((f) => [
+      fmtEvent(f.event),
+      ...(whyLine(f) ? [whyLine(f)] : []),
+      `  Collides with: ${f.clashes.map((c) => `${memberName(c.parent)} — ${c.line}`).join("; ")}`,
+      ...f.context.split("\n").map((l) => `  ${l}`),
+    ].join("\n"));
+    const reply = await systemTurn(thread, to[0], [
+      `[system · work conflict · ${nowPT()} PT]`,
+      `${group.length > 1 ? "These family events are" : "This family event is"} on the calendar for ${names}, and their work calendar${to.length > 1 ? "s collide" : " collides"} with ${group.length > 1 ? "them" : "it"} as things stand:`,
+      ...items,
+      `Write one short text to ${names}. For each event worth raising: say exactly what collides (times; which meetings are in person and where, which have a video link; the drive between places), then recommend what to do — concretely: who's free to take it, which meeting could move or be joined by video, working from home that day or moving the office day, arriving late or leaving early, or skipping it. Offer what you can do (e.g. draft a note asking to move a meeting).`,
+      `Raise every one: a parent who can't make an event they're on, as their day stands, wants to know even when the other parent is free (say so — it's part of the recommendation). Where someone's free to cover and nothing needs moving, one line is enough. Don't change calendars, add to-dos, or schedule anything.`,
+    ].join("\n"), deadlineMs);
+    if (reply === null) { unsent.push(...group); continue; } // the chat's busy: next tick
+    out.flagged += group.length;
+    out.text = [out.text, reply].filter(Boolean).join("\n---\n");
+    if (reply && opts.send !== false) await reachOut(to, reply, thread).catch((e) => console.error("conflict text failed", e));
+  }
+  await save(unsent);
   return out;
 }
 

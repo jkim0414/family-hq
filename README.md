@@ -45,6 +45,16 @@ Theo, and Ava) is fictional.
 - **Plans around work.** Both parents' work calendars are read as private context — never
   copied to the family calendar — with holds (drop-off, focus time, commutes) told apart from
   meetings.
+- **Work conflicts, both ways.** When a family event lands on the calendar and a parent's work
+  day collides with it (a meeting, an office day, a trip), Kimi texts the parents it's for: what
+  collides, where each meeting is and whether it has a video link, and what she'd do about it.
+  A meeting booked later over an event already checked (by someone who can't see the family
+  calendar) goes to that parent alone, with a note they can forward.
+- **Holds on a work calendar.** Optionally, a family event in a parent's working hours gets a
+  "DNS – <event>" hold on their work calendar, so whoever books their meetings works around it.
+  It's an invitation to the work address, already accepted and sent without email, from a
+  calendar of its own — so it works even where a work calendar can't be shared for editing. Holds
+  move with their event and come down when it's gone.
 - **A grandparent (or other caregiver) too.** Optional caregiver role: her own private chat with
   Kimi, plus a shared chat with each parent and one with everyone (each its own group text once
   everyone in it opts in). She sees the calendar, to-dos, and household facts, not spending,
@@ -143,7 +153,10 @@ Login is a 6-digit emailed code, parents only.
 1. **Your family.** Edit `src/data/config.ts` (parents, emails, calendar, home airports, and
    `bundleTerms`, strings that must never ship in the app), `src/data/people.ts`
    (who's who, colors), `src/data/kids.ts` and `src/data/meta.ts` (seed roster and directory),
-   and the family block at the top of the classifier prompt in `api/_lib/classify.ts`. The
+   and the parents at the top of the classifier prompt in `api/_lib/classify.ts` (the kids'
+   grades and schools come from the app's data, so school mail is filed for the right grades). For
+   work-calendar holds, create an empty calendar in the family Google account and put its
+   Calendar ID in `workHolds` in `config.ts`. The
    parent ids (`alex`, `sam`) and kid ids appear throughout the code — rename them with a
    project-wide find-and-replace if you like.
 2. **Your inboxes.** Add your school district's and activities' email domains to

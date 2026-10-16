@@ -1,7 +1,7 @@
 import { classify, profileContext } from "./classify.js";
 import { appendItems, getCollection, getProfile } from "./db.js";
 import { createCalendarEvent, updateCalendarEvent } from "./calendar.js";
-import { eventsSimilar, commsDuplicate, mergeEventDetails, todosSimilar, adjustPrepDue } from "./util.js";
+import { eventsSimilar, commsDuplicate, mergeEventDetails, settleTimes, todosSimilar, adjustPrepDue } from "./util.js";
 import { CONFIG } from "../../src/data/config.js";
 import { canSee, onSharedCalendar } from "./privacy.js";
 import { KIDS } from "../../src/data/kids.js";
@@ -84,7 +84,8 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
       .filter((e) => e.date >= today)
       .sort((a, b) => a.date.localeCompare(b.date))
       .slice(0, 80)
-      .map((e) => `${e.id} | ${e.date} ${e.allDay ? "all-day" : e.start || ""} | ${e.title}${e.location ? ` @ ${e.location}` : ""}`);
+      // Start AND end, so a message that gives different times (a stated 4:00–5:00 vs a guessed 4:15–5:15) shows as a change.
+      .map((e) => `${e.id} | ${e.date} ${e.allDay ? "all-day" : `${e.start || ""}${e.end ? `–${e.end}` : ""}`} | ${e.title}${e.location ? ` @ ${e.location}` : ""}`);
     const tds = [...existingTodos, ...newTodos]
       .filter((t) => !t.done)
       .slice(0, 60)
@@ -132,6 +133,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
       if (set.date) target.date = set.date;
       if (set.start !== undefined) target.start = set.start;
       if (set.end !== undefined) target.end = set.end;
+      settleTimes(target);
       if (set.location !== undefined) target.location = set.location;
       if (set.prep !== undefined) target.prep = set.prep;
       eventIds.push(target.id);
@@ -152,7 +154,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
         startTz: e.startTz,
         endTz: e.endTz,
         allDay: e.allDay,
-        people: c.people,
+        people: e.people?.length ? e.people : c.people,
         owner: c.owner,
         location: e.location,
         prep: e.prep,
@@ -221,7 +223,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
       subject: c.subject || m.subject,
       summary: c.summary,
       reason: c.reason,
-      raw: m.text,
+      raw: m.text.slice(0, 40000), // kept 120 days; the full message stays in the inbox
       mailbox: m.mailbox,
       eventIds,
       todoIds,
