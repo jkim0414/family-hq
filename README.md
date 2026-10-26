@@ -41,7 +41,8 @@ Theo, and Ava) is fictional.
 - **Swipe to delete.** On a phone, swipe a to-do or event left (a scheduled task: to cancel),
   with a 5-second Undo before anything is actually deleted.
 - **Scheduled and recurring tasks.** "Check on the RSVP next Tuesday", "every last day of the
-  month, recap our spending": Kimi runs them on time and reports to whoever asked.
+  month, recap our spending": Kimi runs them on time and reports to whoever asked — or to one
+  person ("text Sam at 6 to…"), or just the parents from a chat a grandparent is in.
 - **Plans around work.** Both parents' work calendars are read as private context — never
   copied to the family calendar — with holds (drop-off, focus time, commutes) told apart from
   meetings.
@@ -81,11 +82,18 @@ Theo, and Ava) is fictional.
 - **One morning text.** At 7:30, one text to both parents: invitations waiting on a decision,
   to-dos overdue or due in the next two days (each checked for proof it's already done first),
   and today in a line; Sundays add the week ahead. Reply in words ("the Tuesday one", "done",
-  "remind me Friday"). Nothing is sent when nothing needs you.
+  "remind me Friday"). It always goes out — a quiet day says so in a line — so a missing one
+  means something's wrong. Time-sensitive mail ("permission slip due tomorrow") comes by text
+  as it arrives, once Kimi checks it's still open; a confirmation or something already handled
+  doesn't.
 - **Invitations: decide first.** Parties, school and PTA meetings, info nights, and sign-ups wait
   as decisions instead of landing on the calendar; soon ones are asked about by text right away.
   A yes puts it on the calendar with who's going, creates its prep, and Kimi offers to RSVP; a no
   archives it. "We don't do X" is remembered.
+- **Email Kimi like you'd text her.** A note from a family member to Kimi's inbox (not a forward)
+  reaches her as a message, attachments and all: reply that something's already handled and
+  she checks it off. Only mail Gmail authenticated as really from them counts; forwards are
+  still filed as before.
 - **One conversation, app or text.** A chat in the app also reaches people by text (a shared chat
   to its group text), and anything Kimi starts on her own goes by text, so a family member who
   never opens the app still gets everything.

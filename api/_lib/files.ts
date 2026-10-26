@@ -77,7 +77,7 @@ export function fileUrl(doc: FileDoc, origin = "https://your-app.vercel.app"): s
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
 
 /** Render a file (or one of its earlier versions, 1 = oldest) as a standalone page. Served with a no-script CSP. */
-export function renderFile(doc: FileDoc, opts: { version?: number; token?: string } = {}): string {
+export function renderFile(doc: FileDoc, opts: { version?: number; token?: string; /** For family: the app page to go back to (no scripts here, so a link). */ back?: string } = {}): string {
   const versions = doc.versions || [];
   const old = opts.version && versions[opts.version - 1];
   const shown = old ? { ...doc, title: old.title, markdown: old.markdown, updatedAt: old.updatedAt } : doc;
@@ -99,7 +99,9 @@ p,li{font-size:15px;line-height:1.55}table{border-collapse:collapse;width:100%;f
 th,td{border:1px solid #e2e8f0;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f1f5f9}
 code{background:#f1f5f9;padding:1px 4px;border-radius:4px}a{color:#2563eb}
 .meta{color:#64748b;font-size:12px;margin-bottom:14px}
-</style></head><body><main>
+.back{position:sticky;top:0;z-index:1;max-width:720px;margin:-24px auto 12px;padding:calc(env(safe-area-inset-top) + 10px) 2px 10px;background:#f8fafc}
+.back a{display:inline-flex;align-items:center;min-height:44px;font-size:16px;font-weight:600;text-decoration:none}
+</style></head><body>${opts.back ? `<nav class="back"><a href="${esc(opts.back)}">‹ Back to Family HQ</a></nav>` : ""}<main>
 <div class="meta">🏡 Family HQ · ${doc.public ? "Shared" : "Private"} · ${day(doc.createdAt)}</div>
 ${history}
 <h1>${esc(shown.title)}</h1>

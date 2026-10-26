@@ -38,12 +38,13 @@ import * as web from "./browser.js";
 import { readUrl } from "./links.js";
 import { getWorkCalConfig, getWorkBlocks, formatBlocks } from "./workcal.js";
 import { findConflicts, type Flag } from "./conflicts.js";
+import { pendingAlerts, clearAlerts, type PendingAlert } from "./alerts.js";
 import { syncWorkHolds, setHoldPref, holdParents, takeNewHolds } from "./workholds.js";
 import { listCredentials, getCredentialField, credentialsAvailable } from "./vault.js";
 import { listOpCards, getOpCard, opConfigured, BUSINESS_CARD_RE } from "./onepassword.js";
 import { guardCheck, pageFacts } from "./guard.js";
 import { canSee, canSeeAll, canSeeArtifact, canSeeTask, onSharedCalendar, threadOwner, threadMembers, getPrivateNotes, addPrivateNote, isParent, memberName, privateThreadId, PARENTS, type Viewer } from "./privacy.js";
-import { threadFor } from "../../src/data/threads.js";
+import { threadFor, MEMBERS } from "../../src/data/threads.js";
 import { summarizeSpending } from "./receipts.js";
 import { dayOutlook, windowWeather, placeOutlook } from "./weather.js";
 import { leaveByTime } from "./travel.js";
@@ -250,7 +251,7 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
           },
           required: ["freq"],
         },
-        notify: { type: "string", enum: ["me", "both"], description: "Who gets the result: the person asking (default), or \"both\" = everyone in this chat (in the family chat, both parents)." },
+        notify: { type: "string", enum: ["me", "parents", "everyone", ...MEMBERS], description: "Who gets the result: the person asking (default); \"parents\" = Alex and Sam (\"remind us\" from a parent); \"everyone\" = everyone in this chat (Grandma too, in a chat she's in); or one person by id (\"text Sam at 6 to…\" → \"sam\"), texted to them alone." },
       },
       required: ["instruction"],
     },
@@ -878,6 +879,18 @@ const fmtEvent = (e: CalEvent) => {
   }${e.invite ? ` · INVITATION: ${e.invite.status === "pending" ? `waiting on a decision${e.invite.rsvpBy ? `, RSVP by ${e.invite.rsvpBy}` : ""}` : e.invite.status === "yes" ? `going${e.invite.going?.length ? ` (${e.invite.going.join(", ")})` : ""}` : e.invite.status === "no" ? "not going" : "expired, undecided"}` : ""}`;
 };
 /**
+ * fmtEvent, plus what's already done for it (its to-dos from the same message, checked off), so
+ * something already done (an RSVP sent) doesn't look open — or get offered again.
+ */
+const fmtEventWithDone = (todos: Todo[]) => {
+  const done = new Map<string, string[]>();
+  for (const t of todos) if (t.done && t.commId) done.set(t.commId, [...(done.get(t.commId) || []), t.title]);
+  return (e: CalEvent) => {
+    const d = e.commId ? done.get(e.commId) : undefined;
+    return `${fmtEvent(e)}${d?.length ? ` · ALREADY DONE (checked off): ${d.slice(0, 3).map((x) => clip(x, 70)).join("; ")}` : ""}`;
+  };
+};
+/**
  * Shorten notes for a listing, but never cut a link: a cut-off URL opens an error page (an Evite
  * link in a to-do came through as ".../journey-maya-ch" and Kimi reported the invite as broken).
  */
@@ -973,13 +986,13 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       // On the calendar: fixed dates and invitations they said yes to. Undecided ones are listed apart.
       const events = inWindow.filter(onCalendar);
       const waiting = vis(await getCollection("events")).filter((e) => awaitingDecision(e) && (e.endDate || e.date) >= today);
-      const todos = vis(await getCollection("todos"))
-        .filter((t) => !t.done)
-        .sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
+      const allTodos = vis(await getCollection("todos"));
+      const todos = allTodos.filter((t) => !t.done).sort((a, b) => (a.due || "9999").localeCompare(b.due || "9999"));
+      const fmtE = fmtEventWithDone(allTodos);
       return [
         `Today (PT): ${today}. Events ${from === today ? `in the next ${days} days` : `${from} to ${to}`}:`,
-        ...(events.length ? events.map(fmtEvent) : ["(none)"]),
-        ...(waiting.length ? ["", "Invitations waiting on a decision (NOT on the calendar until a parent says yes — decide_invitation):", ...waiting.map(fmtEvent)] : []),
+        ...(events.length ? events.map(fmtE) : ["(none)"]),
+        ...(waiting.length ? ["", "Invitations waiting on a decision (NOT on the calendar until a parent says yes — decide_invitation):", ...waiting.map(fmtE)] : []),
         "",
         `Open to-dos (${todos.length}):`,
         ...(todos.length ? todos.slice(0, 40).map(fmtTodo) : ["(none)"]),
@@ -1024,7 +1037,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       // A date in the query ("oct 29", "10/29") also finds what's on that day, spans included.
       const onDate = dateQ ? evs.filter((e) => { const d = toHomeZone(e).date; return d <= dateQ && (e.endDate || d) >= dateQ; }) : [];
       const evAll = [...new Map([...onDate, ...ev.items].map((e) => [e.id, e])).values()];
-      if (evAll.length) out.push(`Events${ev.partial && !onDate.length ? " (partial matches)" : ""}:`, ...evAll.map(fmtEvent));
+      if (evAll.length) out.push(`Events${ev.partial && !onDate.length ? " (partial matches)" : ""}:`, ...evAll.map(fmtEventWithDone(vis(todos))));
       const td = pick(vis(todos), (t) => score(t.title, t.detail), 10);
       if (td.items.length) out.push(`To-dos${td.partial ? " (partial matches)" : ""}:`, ...td.items.map((t) => fmtTodo(t) + (t.done ? " (done)" : "")));
       const ct = pick(contacts, (c) => score(c.name, c.role, c.org, c.email), 10);
@@ -1184,7 +1197,8 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const dup = vis(await getCollection("todos")).find((x) => !x.done && sameScope(x, todo) && todosSimilar(x, todo));
       if (dup) return `Already tracked — not adding a duplicate: ${fmtTodo(dup)}`;
       await appendItems("todos", [todo]);
-      return `Added${keptNote(todo)} to-do: ${fmtTodo(todo)}`;
+      // Say where it shows (not just "your list").
+      return `Added${keptNote(todo)} to-do: ${fmtTodo(todo)}\n(In the app: Agenda → ${todo.due ? `under ${todo.due}` : "Anytime, at the top (no due date)"}${todo.due ? "; the morning text lists it when it's due" : ""}. Say where, not "your list".)`;
     }
     case "update_todo": {
       const todos = await getCollection("todos");
@@ -1340,16 +1354,18 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
           title: String(input?.title || "").trim() || shortTitle(instruction, 60),
           instruction,
           owner: task.owner,
-          notify: input?.notify === "both" ? "both" : "owner",
+          notify: input?.notify === "both" || input?.notify === "everyone" || input?.notify === "parents" ? "both" : "owner",
+          notifyTo: (MEMBERS as string[]).includes(input?.notify) && input.notify !== task.owner ? (input.notify as Member) : undefined,
           channel: task.channel,
           date: input?.date,
           time: input?.time,
           repeat,
-          thread: threadId,
-          ...scope,
+          // "parents": the parents' chat (a reminder for them both shouldn't reach anyone else in this one).
+          thread: input?.notify === "parents" && isParent(task.owner) ? MAIN_TASK_ID : threadId,
+          ...(input?.notify === "parents" && isParent(task.owner) ? {} : scope),
         });
         const first = new Date(sch.nextRunAt!).toLocaleString("en-US", { timeZone: HOME_TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-        return `Scheduled "${sch.title}": ${describeSchedule(sch)}. First run ${first} PT. Results go to ${sch.notify === "both" ? "both parents" : memberName(task.owner)}. (id ${sch.id})`;
+        return `Scheduled "${sch.title}": ${describeSchedule(sch)}. First run ${first} PT. Results go to ${sch.notify === "both" ? threadMembers(sch.thread || MAIN_TASK_ID).map(memberName).join(" and ") : `${memberName(sch.notifyTo || task.owner)}${sch.notifyTo ? " alone" : ""}`}. (id ${sch.id})`;
       } catch (e) {
         return `error: ${(e as Error).message}`;
       }
@@ -2045,7 +2061,7 @@ HOW YOU WORK
 - Work calendars: for planning a day or week, suggesting times, checking a kid event against work, or vacation planning, look at get_work_calendar first. It's context only — never add work meetings to the family calendar, and share only what's needed (e.g. "Alex is in meetings until 4"), not meeting details. Entries marked (hold) have no other attendees: blocks a parent placed on their own calendar. They are NOT meetings — never call them meetings or count them as such. Some are real commitments (Dropoff, school duties, a commute, a flight); others are protected time (DNS = do not schedule, email catch-up, focus) that the parent could flex. Read the title for which. A "commute — office day" hold means that parent is at their office that day; "trip travel" means they're flying. The household facts say who normally does what (e.g. who does drop-off, and which days a parent works from an office). Before calling something a coverage gap because both parents are busy, check the household facts for who else covers (a grandparent, a sitter, after-school care). Only flag a gap when none of them works or a parent specifically needs to be there.
 - Money: get_spending answers "what did we spend / did that payment go through" from receipts (say it's from receipts, not a bank statement). To pay a person (babysitter, class fund), use prepare_payment — it gives the parent a Venmo link to confirm; you never send money yourself. Purchases on websites go through a browser task and one approval that names the card; never pick a company card unless the parent says so.
 - Weather and travel: for outdoor plans, check get_weather and mention rain or heat when it matters. Event listings include "~N min drive, leave by …" for places a real drive from home — use it when timing matters (who can get there, when to leave).
-- VERIFY BEFORE ASSERTING. When you're unsure whether something is done or still needed — an RSVP, a sign-up, a payment, a registration — or of a detail like a time or place, check before you answer: search_email on BOTH parents' inboxes (one of them often replied from their phone), read_link on the invitation or sign-up link in the event's notes or the email, and a browser task if it's behind a login. Never tell a parent something is open or unknown without having looked. Say what you found and where.
+- VERIFY BEFORE ASSERTING. When you're unsure whether something is done or still needed — an RSVP, a sign-up, a payment, a registration — or of a detail like a time or place, check before you answer: search_email on BOTH parents' inboxes (one of them often replied from their phone), read_link on the invitation or sign-up link in the event's notes or the email, and a browser task if it's behind a login. Never tell a parent something is open or unknown without having looked. Say what you found and where. The same before OFFERING to do it ("want me to RSVP?"): an event listed with ALREADY DONE (checked off) is done — don't offer it again.
 - Travel: compare flights with search_flights, hotels with search_hotels, and look up local businesses with search_places — seconds, not a browser task. If the household facts name a preferred airline, search it first and book on its own site in a browser task signed in to the family's saved login, adding every traveler's loyalty number, legal name, and date of birth from get_travelers (and Known Traveler / passport numbers with browse_fill_travel_doc). Put a multi-option comparison in a File. When someone mentions a loyalty number or seat preference, save it with save_traveler_info.
 - Research: use web_search (and read_link for a specific page) for the outside world (camps, classes, vendors, hours, prices) and search_email for what's in the inboxes (school inbox, or a parent's own Gmail if connected — pick the account by whose mail it would be). Say briefly where facts came from.
 - Anything that needs a real browser (register, book, buy, cancel, fill a site's form, check an account) → start_browser_task with a complete, self-contained goal and details. It pauses ONCE for the parents' approval before committing. You cannot make phone calls.
@@ -2436,7 +2452,7 @@ export function addUserMessage(task: Task, who: Member, channel: Channel, text: 
  * nextCheckAt=now so the next cron tick resumes it. Returns the reply text
  * ("" if still working or waiting).
  */
-export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?: number }): Promise<string> {
+export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?: number; /** "Nothing to say" is a valid outcome: return "" (system-started turns). */ silentOk?: boolean }): Promise<string> {
   const maxSteps = opts.maxSteps ?? (task.kind === "browser" ? 40 : 20);
   const parts = await systemParts(task);
   const tools = toolsFor(task);
@@ -2528,7 +2544,7 @@ export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?
   const t = reply.trim();
   const aside = /^[\s*_]*[(\[][\s\S]*[)\]][\s*_]*$/.test(t) || /^[\s*_(\[]*no (reply|response)\b/i.test(t);
   if (ctx.reacted && (aside || /^[^\p{L}\p{N}]*$/u.test(t))) reply = ""; // nothing but punctuation / emoji
-  else if (!reply) reply = "(no reply)";
+  else if (!reply && !opts.silentOk) reply = "(no reply)";
   if (reply) task.lastReply = reply;
   // A pending follow-up (nextCheckAt in the future) keeps the task "waiting".
   task.status = task.status === "waiting" || (task.nextCheckAt && task.nextCheckAt > new Date().toISOString()) ? "waiting" : "open";
@@ -2604,7 +2620,7 @@ async function systemTurn(threadId: string, owner: Member, content: string, dead
     (task.thread as Anthropic.MessageParam[]).push({ role: "user", content });
     task.status = "running";
     await saveTask(task);
-    return (await runAgent(task, { deadlineMs })) || "";
+    return (await runAgent(task, { deadlineMs, silentOk: true })) || "";
   } finally {
     await releaseTaskLock(threadId);
   }
@@ -2661,6 +2677,15 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
     }
   }
 
+  // Time-sensitive mail, by text (outside quiet hours; overnight ones go in the morning text).
+  if (!testing && !quiet && (now >= "11:00" || !!(await redis.get(`roundup:${today}`)))) {
+    try {
+      await runAlerts(deadlineMs, { send: opts.send });
+    } catch (e) {
+      console.error("alerts failed", e);
+    }
+  }
+
   // Holds on work calendars for family events in working hours (no texts: quiet hours don't matter).
   if (!testing) {
     try {
@@ -2688,6 +2713,7 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
   const soonTodos = todos.filter((t) => family(t) && !t.done && t.due && t.due <= addDays(today, 2)).sort((a, b) => (a.due || "").localeCompare(b.due || ""));
   const todayEvents = mine.filter((e) => onCalendar(e) && toHomeZone(e).date <= today && (e.endDate || toHomeZone(e).date) >= today);
   const sunday = new Date(`${today}T12:00:00Z`).getUTCDay() === 0;
+  const overnight = await pendingAlerts();
   const newHolds = (await Promise.all(holdParents().map(async (p) => (await takeNewHolds(p)).map((h) => `${memberName(p)}: ${h}`)))).flat();
   const week = sunday ? mine.filter((e) => onCalendar(e) && toHomeZone(e).date > today && toHomeZone(e).date <= addDays(today, 7)) : [];
   const content = [
@@ -2699,14 +2725,52 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
     ...(soonTodos.length ? soonTodos.map(fmtTodo) : ["(none)"]),
     `3. Today, in one line:`,
     ...(todayEvents.length ? todayEvents.map(fmtEvent) : ["(nothing scheduled)"]),
+    ...(overnight.length ? [`Also, time-sensitive mail since last night — check each is still open first (not a confirmation, not already handled: search_email, the to-do; not past) and include only what's left, with the step to take:`, ...overnight.map((a) => `• ${a.title} — ${a.summary}`)] : []),
     ...(newHolds.length ? [`Also one line: holds you put on work calendars since yesterday, so whoever books their meetings works around them (they can say "don't hold that one"): ${newHolds.join("; ")}`] : []),
     ...(sunday ? [`4. Sunday: the week ahead, briefly (the days that matter, not every event):`, ...(week.length ? week.map(fmtEvent) : ["(quiet week)"])] : []),
-    `Look up anything you need. If there's no decision, no to-do, and nothing notable today, end with NO text at all.`,
+    `Look up anything you need. Always send it — it's how they know you're on the job: on a quiet day, one short line saying nothing needs them, plus anything on today ("Nothing needs you today. Swim lesson at 4.").`,
   ].join("\n");
-  const reply = await systemTurn(chat, "alex", content, deadlineMs);
+  let reply = await systemTurn(chat, "alex", content, deadlineMs);
+  if (reply !== null) await clearAlerts(overnight.map((a) => a.commId));
+  // The morning text always goes out — its absence should only ever mean something's wrong.
+  if (reply === "") reply = `Morning! Nothing needs you today.${todayEvents.length ? ` Today: ${todayEvents.map((e) => `${e.title}${!e.allDay && e.start ? ` (${fmt12(toHomeZone(e).start)})` : ""}`).join("; ")}.` : ""}`;
   await markAsked(waiting.map((e) => e.id));
   await send(reply);
   out.roundup = true;
+  return out;
+}
+
+/**
+ * Mail filed as time-sensitive (alerts.ts): Kimi checks each is still open and texts the parents
+ * it's for, in one message. Nothing left to do → no text. thread/send: checks only.
+ */
+export async function runAlerts(deadlineMs: number, opts: { thread?: string; send?: boolean; only?: string[] } = {}): Promise<{ handled: number; text?: string }> {
+  const all = (await pendingAlerts()).filter((a) => !opts.only || opts.only.includes(a.commId));
+  const out: { handled: number; text?: string } = { handled: 0 };
+  if (!all.length) return out;
+  const groups = new Map<string, PendingAlert[]>();
+  for (const a of all) {
+    const named = a.owner.filter((o) => (PARENTS as readonly string[]).includes(o));
+    const key = (named.length ? named : [...PARENTS]).sort().join(",");
+    groups.set(key, [...(groups.get(key) || []), a]);
+  }
+  for (const [key, list] of groups) {
+    if (Date.now() > deadlineMs - 60_000) break;
+    const to = key.split(",") as Member[];
+    const names = to.map(memberName).join(" and ");
+    const thread = opts.thread || (to.length > 1 ? MAIN_TASK_ID : privateThreadId(to[0]));
+    const reply = await systemTurn(thread, to[0], [
+      `[system · time-sensitive mail · ${nowPT()} PT]`,
+      `Just filed from email, marked time-sensitive (each is in the inbox and on the to-do list/calendar as filed):`,
+      ...list.map((a) => `• ${a.title} — ${a.summary} [${a.commId}]`),
+      `Before texting ${names}, check each: is it still open? (A confirmation of something already done — "you're signed up", "order received" — is not an action. Something already handled — search_email in both inboxes, the to-do checked off — is not either. A deadline already past isn't worth a text.) Is it something they'd want now, not just FYI? Write ONE short text with only what's left: what, by when, and the link or step to do it. If nothing's left, write nothing at all.`,
+    ].join("\n"), deadlineMs);
+    if (reply === null) continue; // the chat's busy: next tick
+    await clearAlerts(list.map((a) => a.commId));
+    out.handled += list.length;
+    out.text = [out.text, reply].filter(Boolean).join("\n---\n");
+    if (reply && opts.send !== false) await reachOut(to, reply, thread).catch((e) => console.error("alert text failed", e));
+  }
   return out;
 }
 
@@ -2788,13 +2852,14 @@ export async function runDueSchedules(deadlineMs: number, opts: { taskId?: strin
         const owner = threadOwner(threadId);
         const task = (await getTask(threadId)) || newTask(threadId, "Family chat", s.owner, s.channel);
         if (owner) task.privateTo = owner;
-        task.owner = s.owner;
+        // For someone else: it runs as them, in their chat (their scope, not the asker's).
+        task.owner = s.notifyTo || s.owner;
         task.channel = s.channel;
         const asker = memberName(s.owner);
         // A private schedule only ever reports to its owner; "both" means everyone in its chat.
-        const both = s.notify === "both" && !s.privateTo;
+        const both = s.notify === "both" && !s.privateTo && !s.notifyTo;
         const everyone = threadMembers(threadId);
-        const audience = both ? everyone.map(memberName).join(" and ") : asker;
+        const audience = both ? everyone.map(memberName).join(" and ") : s.notifyTo ? `${memberName(s.notifyTo)} (${asker} asked you to send it)` : asker;
         (task.thread as Anthropic.MessageParam[]).push({
           role: "user",
           content: `[system · scheduled task · ${nowPT()} PT]\n"${s.title}" — ${describeSchedule(s)}; set up by ${asker}.\nDo this now: ${s.instruction}\nLook things up as needed (never from memory), then write the message ${audience} should receive.`,
@@ -2802,9 +2867,9 @@ export async function runDueSchedules(deadlineMs: number, opts: { taskId?: strin
         pushLog(task, { at: new Date().toISOString(), kind: "system", text: `Scheduled: ${s.title}` });
         task.status = "running";
         await saveTask(task);
-        const reply = await runAgent(task, { deadlineMs });
+        const reply = await runAgent(task, { deadlineMs, silentOk: true });
         if (reply && opts.send !== false) {
-          const to: Member[] = both ? everyone : [s.privateTo || s.owner];
+          const to: Member[] = both ? everyone : [s.notifyTo || s.privateTo || s.owner];
           await reachOut(to, reply, threadId).catch((e) => console.error("schedule notify failed", e));
         }
         ran++;

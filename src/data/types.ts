@@ -186,6 +186,8 @@ export interface Schedule {
   instruction: string; // what Kimi should do when it fires
   owner: Member; // who asked — they get the result
   notify: "owner" | "both";
+  /** One other person the result goes to ("text Sam at 6 to…"), instead of whoever asked. */
+  notifyTo?: Member;
   channel: Channel; // where the asker was when they set it up
   /** The chat thread it runs in and reports to (default: the family chat). */
   thread?: string;

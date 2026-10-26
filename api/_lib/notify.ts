@@ -91,6 +91,7 @@ export function smsChunks(body: string, max = 1500): string[] {
 
 /** Send one SMS through Twilio's REST API (no SDK — one form POST). Long texts go as several, in order. */
 export async function sendSms(to: string, rawBody: string, mediaUrl?: string): Promise<void> {
+  if (isEmptyMessage(rawBody) && !mediaUrl) return;
   if (localSkip(`text to ${to.slice(-4)}`)) return;
   if (!smsConfigured()) throw new Error("Twilio not configured");
   const parts = smsChunks(smsBody(rawBody));
@@ -144,7 +145,12 @@ export async function sendReactionSms(to: string, emoji: string, quoted: string)
 }
 
 /** Deliver a proactive assistant message to a member on their channel. */
+/** Nothing to say: empty, or only a placeholder ("(no reply)", "(…)"). Never sent to anyone. */
+export const isEmptyMessage = (text: string): boolean => /^[\s"'*_]*(\((no reply|no response|…|\.\.\.)\)|…)?[\s"'*_]*$/i.test(text || "");
+
 export async function notify(userId: Member, text: string, channel: Channel, opts: { emailFallback?: boolean; thread?: string } = {}): Promise<void> {
+  // A placeholder for "said nothing" must never reach anyone.
+  if (isEmptyMessage(text)) return;
   const u = userById(userId); // null for a caregiver who doesn't sign in to the app (texts only)
   // A chat's group text reaches everyone in it at once; without one, fall back to a one-on-one text.
   if (channel === "group") {
@@ -176,6 +182,7 @@ export async function notify(userId: Member, text: string, channel: Channel, opt
 
 /** Deliver one message to several parents: once to the group text when that's the channel, else to each. */
 export async function deliver(to: Member[], text: string, channel: Channel, thread = "task-main"): Promise<void> {
+  if (isEmptyMessage(text)) return;
   if (channel === "group" && (await sendGroup(thread, text).catch(() => false))) return;
   for (const p of to) await notify(p, text, channel === "group" ? "sms" : channel).catch((e) => console.error("notify failed", e));
 }

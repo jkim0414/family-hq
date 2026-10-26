@@ -93,6 +93,18 @@ export default function Agenda() {
         </section>
       )}
 
+      {undated.length > 0 && (
+        <section>
+          {/* Up top: below months of events, an undated to-do is easy to miss. */}
+          <SectionHeader title="Anytime" hint="no date" />
+          <Card className="divide-y divide-line">
+            {undated.map((t) => (
+              <TodoItem key={t.id} todo={t} done={false} onToggle={() => toggleTodo(t.id, true)} onEdit={() => setEditTodo(t)} />
+            ))}
+          </Card>
+        </section>
+      )}
+
       {days.length === 0 && overdue.length === 0 && undated.length === 0 && <Empty>Nothing coming up{person ? ` for ${PEOPLE.find((p) => p.id === person)?.name}` : ""}.</Empty>}
 
       {days.map((g) => (
@@ -101,17 +113,6 @@ export default function Agenda() {
           <div className="space-y-2">{g.items.map(renderItem)}</div>
         </section>
       ))}
-
-      {undated.length > 0 && (
-        <section>
-          <SectionHeader title="No date" />
-          <Card className="divide-y divide-line">
-            {undated.map((t) => (
-              <TodoItem key={t.id} todo={t} done={false} onToggle={() => toggleTodo(t.id, true)} onEdit={() => setEditTodo(t)} />
-            ))}
-          </Card>
-        </section>
-      )}
 
       {(past.length > 0 || done.length > 0) && (
         <details className="group">

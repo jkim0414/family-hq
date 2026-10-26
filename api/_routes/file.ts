@@ -36,5 +36,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
   // Earlier versions are for the family; a shared link shows the current one.
   const v = member ? Number(req.query.v) || undefined : undefined;
-  res.status(200).send(renderFile(member ? doc : { ...doc, versions: [] }, { version: v, token: t || undefined }));
+  // Opened from the app on a phone (a home-screen app has no browser controls): a way back to where they were.
+  let back: string | undefined;
+  if (member) {
+    back = "/";
+    try {
+      const ref = new URL(String(req.headers.referer || ""));
+      if (ref.host === req.headers.host && !ref.pathname.startsWith("/f/") && !ref.pathname.startsWith("/api/")) back = ref.pathname + ref.search;
+    } catch { /* no referrer: Home */ }
+  }
+  res.status(200).send(renderFile(member ? doc : { ...doc, versions: [] }, { version: v, token: t || undefined, back }));
 }

@@ -44,6 +44,7 @@ export const todos = [
   { id: "t3", title: "Bring orange slices for soccer (our week)", due: D(4), people: ["max"], owner: ["alex"], priority: "normal", done: false },
   { id: "t4", title: "Wrap Maya's gift + sign the card", due: D(4), people: ["max", "theo", "ava"], owner: ["sam"], priority: "normal", done: false },
   { id: "t5", title: "Pack sack lunch for pumpkin patch", due: D(8), people: ["theo"], owner: ["sam"], priority: "normal", done: false },
+  { id: "t7", title: "Ask the handyman to fix the squeaky gate", owner: ["alex"], priority: "normal", done: false },
   { id: "t6", title: "RSVP to Maya's party", people: ["max", "theo", "ava"], priority: "normal", done: true },
 ];
 

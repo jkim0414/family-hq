@@ -172,6 +172,7 @@ EVENTS vs TO-DOS (important — keep the calendar uncluttered):
 - A calendar EVENT is something that HAPPENS at a date/time/place the family should see on a calendar: a party, Field Day, Picture Day, a performance, an appointment, a visitor's arrival, a no-school day, an offsite/coverage day.
 - A TO-DO is something someone must DO. A deadline or task — "bring a labeled brown bag by Tue", "RSVP by the 10th", "buy a gift", "send a white shirt Friday" — is a TO-DO WITH A DUE DATE. Do NOT also create a calendar event for it (no redundant calendar clutter).
 - When a real EVENT needs prep, create the event AND a separate prep to-do (e.g. event "Field Day" + to-do "pack a water bottle"). That's two distinct things, not a duplicate.
+- Never a to-do that only restates going to an event ("Attend the teacher conference", "Go to the party"): the event on the calendar is the reminder. Prep for it (forms, gifts, questions to bring) is a to-do.
 - So: events array = only genuine events/occasions. todos array = the actions. Many items are todos-only (a deadline) or events-only (Picture Day); some are both (an event + its prep).
 - UPDATES: if a note revises an existing thing ("updated details for the Class Potluck", "the potluck moved to 4pm", "correction: …"), output the event using its SAME name with the corrected details (keep the original date unless the note changes it). The system matches it to the existing event and updates it in place — so don't rename it or invent a new title.
 

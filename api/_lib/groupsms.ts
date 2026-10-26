@@ -1,7 +1,7 @@
 import { localSkip } from "./sandbox.js";
 import { redis } from "./db.js";
 import { twilioAuth, readMedia, MEDIA_OK, type FetchedMedia } from "./twilio.js";
-import { smsBody, smsChunks, sendSms, getSmsOptIn, phoneFor, smsConfigured, tapbackText, textable } from "./notify.js";
+import { smsBody, smsChunks, sendSms, getSmsOptIn, phoneFor, smsConfigured, tapbackText, textable, isEmptyMessage } from "./notify.js";
 import { memberName } from "./privacy.js";
 import { MEMBERS, MAIN_THREAD, threadsFor, threadMembers } from "../../src/data/threads.js";
 import type { Member } from "../../src/data/types";
@@ -142,6 +142,7 @@ async function createGroup(thread: string, ms: Member[]): Promise<boolean> {
 
 /** Kimi says something in a chat's group text (branded, plain text, HQ links only — like every text). */
 export async function sendGroup(thread: string, raw: string): Promise<boolean> {
+  if (isEmptyMessage(raw)) return true; // nothing to say: nothing sent (and no one-on-one fallback)
   if (localSkip(`group text to ${thread}`)) return true; // "sent", so callers don't fall back to 1:1 texts
   const g = await getGroup(thread);
   if (!g) return false;

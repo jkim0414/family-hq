@@ -18,7 +18,28 @@ export interface RawMessage {
   attachments: Attachment[];
   /** Links found in the body (labelled when the HTML part had anchors). */
   links?: Link[];
+  /** To and Cc addresses, lowercased. */
+  recipients?: string[];
+  /** Gmail confirmed the From address (DMARC pass, or DKIM pass for the sender's own domain) — not forged. */
+  fromVerified?: boolean;
 }
+
+/** Gmail's own verdict on the sender (its Authentication-Results header, added on receipt). */
+export function senderVerified(parsed: { headers?: Map<string, unknown>; from?: { value?: { address?: string }[] } }): boolean {
+  const raw = parsed.headers?.get("authentication-results");
+  const results = (Array.isArray(raw) ? raw : raw ? [raw] : []).map(String).filter((r) => /^\s*mx\.google\.com/i.test(r));
+  if (!results.length) return false;
+  const r = results[0];
+  const domain = (parsed.from?.value?.[0]?.address || "").split("@")[1]?.toLowerCase() || "";
+  if (/\bdmarc=pass\b/i.test(r)) return true;
+  return !!domain && new RegExp(`\\bdkim=pass\\b[^;]*header\\.(i|d)=@?${domain.replace(/\./g, "\\.")}\\b`, "i").test(r);
+}
+
+const addresses = (...fields: unknown[]): string[] =>
+  fields
+    .flatMap((f) => (Array.isArray(f) ? f : f ? [f] : []))
+    .flatMap((o: any) => (o?.value || []).map((v: any) => String(v?.address || "").toLowerCase()))
+    .filter(Boolean);
 
 /**
  * Plain text of a message (HTML-only mail is converted), plus its links. Long enough for a whole
@@ -85,6 +106,8 @@ export async function fetchUnseen(markSeen = false): Promise<RawMessage[]> {
         text: body.text,
         links: body.links,
         attachments: extractAttachments(parsed),
+        recipients: addresses(parsed.to, parsed.cc),
+        fromVerified: senderVerified(parsed as any),
       });
     }
     if (markSeen && uids.length) {

@@ -3,7 +3,10 @@ import { authorized, json } from "../_lib/http.js";
 import { fetchUnseen, markSeen } from "../_lib/imap.js";
 import { isOverlay, isUidSeen, markUidSeen, redis, setLastCalSync } from "../_lib/db.js";
 import { importCalendarEvents, type CalSyncResult } from "../_lib/calsync.js";
-import { runInvitationsAndRoundup, runDueTasks, runDueSchedules } from "../_lib/agent.js";
+import { runInvitationsAndRoundup, runDueTasks, runDueSchedules, converse, reachOut } from "../_lib/agent.js";
+import { noteFrom, noteThread, noteText } from "../_lib/email-notes.js";
+import { threadMembers } from "../_lib/privacy.js";
+import type { Member } from "../../src/data/types";
 import { fileMessages, type FileInput } from "../_lib/file-mail.js";
 import { runWatch, type WatchStats } from "../_lib/watch.js";
 import { sweepVerifiable } from "../_lib/verify.js";
@@ -140,8 +143,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     try {
       const toFile: FileInput[] = [];
       const skippedUids: number[] = [];
+      const notes: { m: (typeof messages)[number]; who: Member }[] = [];
       for (const m of messages) {
         if (await isUidSeen(m.uid)) continue;
+        // Someone in the family writing to Kimi (not forwarding): a message to her, not mail to file.
+        const who = noteFrom(m);
+        if (who) {
+          notes.push({ m, who });
+          continue;
+        }
         if (SKIP_SENDERS.some((re) => re.test(m.from))) {
           skippedUids.push(m.uid);
           continue;
@@ -151,7 +161,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       const stats = await fileMessages(toFile, { quiet });
 
-      const processedUids = [...skippedUids, ...stats.processedKeys.map(Number)];
+      const noteUids: number[] = [];
+      for (const { m, who } of notes) {
+        if (Date.now() > started + 200_000) break;
+        const thread = noteThread(who, m);
+        try {
+          const { reply } = await converse(thread, who, "app", noteText(m), started + 200_000, { attachments: m.attachments });
+          noteUids.push(m.uid);
+          if (reply) await reachOut(threadMembers(thread), reply, thread).catch((e) => console.error("email note reply failed", e));
+        } catch (e) {
+          console.error("email note to Kimi failed (retried next run)", (e as Error).message);
+        }
+      }
+
+      const processedUids = [...skippedUids, ...stats.processedKeys.map(Number), ...noteUids];
       for (const uid of processedUids) await markUidSeen(uid);
       await markSeen(processedUids).catch((e) => console.error("markSeen failed", e));
 

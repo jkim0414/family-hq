@@ -29,6 +29,7 @@ import authSession from "./_routes/auth/session.js";
 import oauthStart from "./_routes/oauth/start.js";
 import oauthCallback from "./_routes/oauth/callback.js";
 import adminSeed from "./_routes/admin/seed.js";
+import adminSmsLog from "./_routes/admin/sms-log.js";
 import action from "./_routes/action.js";
 import files from "./_routes/files.js";
 import file from "./_routes/file.js";
@@ -74,6 +75,7 @@ const ROUTES: Record<string, Handler> = {
   "oauth/start": oauthStart,
   "oauth/callback": oauthCallback,
   "admin/seed": adminSeed,
+  "admin/sms-log": adminSmsLog,
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {

@@ -45,7 +45,19 @@ check("a private event is only for its owner", responsibleFor(ev("07:30", "10:30
 const events = await db.getCollection("events");
 await db.redis.del("conflicts_seen"); // the overlay's copy only: as if nothing had been raised yet
 const first = await findConflicts(events);
-const flag = first.flags[0];
+// What the family has already talked over with Kimi (they said they'd handle it themselves): she may rightly
+// leave it out. The live checks use the first conflict nobody has discussed.
+const said = await (async () => {
+  const out: string[] = [];
+  for (const id of ["task-main", "task-private-alex", "task-private-sam", "task-with-alex-sam-grandma"]) {
+    const t: any = await db.getTask(id);
+    for (const m of t?.thread || []) if (m.role === "user") out.push((typeof m.content === "string" ? m.content : (m.content || []).map((c: any) => c.text || "").join(" ")).toLowerCase());
+  }
+  return out.filter((x) => !x.startsWith("[system")).join("\n");
+})();
+const keyWords = (title: string) => (title.toLowerCase().match(/[a-z]{4,}/g) || []).filter((w) => !["2026", "with", "from", "game", "party", "night"].includes(w)).slice(0, 3);
+const discussed = (title: string) => { const w = keyWords(title); return w.some((x) => said.includes(x)); };
+const flag = first.flags.find((f) => !discussed(f.event.title));
 if (!flag) {
   console.log("(no upcoming family event collides with a work calendar right now — skipping the live part)");
 } else {
@@ -85,7 +97,7 @@ if (!flag) {
     const many = await a.runConflictFlags(Date.now() + 200_000, { thread: `${chat}-many`, only: all.map((f) => f.event.id), send: false });
     console.log(`\nKimi (${all.length} at once):\n${many.text}\n`);
     const t = (many.text || "").toLowerCase();
-    const missing = all.filter((f) => !(f.event.title.toLowerCase().match(/[a-z]{4,}/g) || []).filter((w) => !["2026", "with", "from", "game"].includes(w)).slice(0, 3).some((w) => t.includes(w)));
+    const missing = all.filter((f) => !keyWords(f.event.title).some((w) => t.includes(w)) && !discussed(f.event.title));
     check("several conflicts at once: every one is raised", missing.length === 0, missing.map((f) => f.event.title).join("; "));
   }
   const moved = events.map((e) => (e.id === flag.event.id ? { ...e, start: flag.event.start, end: flag.event.end, owner: [...(e.owner || []), "x"] } : e));

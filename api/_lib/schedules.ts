@@ -38,6 +38,8 @@ export interface NewSchedule {
   instruction: string;
   owner: Member;
   notify?: "owner" | "both";
+  /** Someone else to send the result to (it runs in their private chat). */
+  notifyTo?: Member;
   channel: Channel;
   /** "YYYY-MM-DD" and/or "HH:mm" of the first run; for repeats the date may be omitted (next match from today). */
   date?: string;
@@ -81,11 +83,13 @@ export async function createSchedule(input: NewSchedule): Promise<Schedule> {
     title: input.title.trim().slice(0, 80) || input.instruction.trim().slice(0, 60),
     instruction: input.instruction.trim().slice(0, 1500),
     owner: input.owner,
-    notify: input.notify === "both" ? "both" : "owner",
+    notify: input.notify === "both" && !input.notifyTo ? "both" : "owner",
+    ...(input.notifyTo && input.notifyTo !== input.owner ? { notifyTo: input.notifyTo } : {}),
     channel: input.channel,
     // A result for one person runs in that person's private chat, even when it was set up in a
     // shared one: it's texted to them alone, and the shared chat shouldn't show a message meant for them.
-    thread: input.notify !== "both" && input.thread && threadMembers(input.thread).length > 1 ? privateThreadId(input.owner) : input.thread,
+    // For someone else: their private chat.
+    thread: input.notifyTo && input.notifyTo !== input.owner ? privateThreadId(input.notifyTo) : input.notify !== "both" && input.thread && threadMembers(input.thread).length > 1 ? privateThreadId(input.owner) : input.thread,
     privateTo: input.privateTo,
     audience: input.audience,
     time,
@@ -130,7 +134,7 @@ export async function cancelSchedule(idOrTitle: string): Promise<Schedule | null
 
 export function fmtSchedule(s: Schedule): string {
   const next = s.nextRunAt ? new Date(s.nextRunAt).toLocaleString("en-US", { timeZone: HOME_TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—";
-  const who = s.notify === "both" ? "both parents" : memberName(s.owner);
+  const who = s.notify === "both" ? threadMembers(s.thread || "task-main").map(memberName).join(" and ") : memberName(s.notifyTo || s.owner);
   return `• [${s.id}] ${s.title} — ${describe(s)} · next: ${next} · reports to ${who}`;
 }
 

@@ -56,7 +56,7 @@ export function ScheduledList() {
                         minute: "2-digit",
                       })
                     : "—"}{" "}
-                  · for {s.notify === "both" ? "Alex & Sam" : personName(s.owner)}
+                  · for {s.notify === "both" ? "Alex & Sam" : personName(s.notifyTo || s.owner)}
                 </div>
               </div>
             </Swipeable>

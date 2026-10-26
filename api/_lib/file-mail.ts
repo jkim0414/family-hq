@@ -11,8 +11,8 @@ import { applyMetadata } from "./metadata.js";
 import { trustedSender } from "./senders.js";
 import { inviteOf, routeTodo, holdTodo, mergeInvite } from "./invites.js";
 import { onCalendar } from "../../src/data/invites.js";
-import { esc } from "./http.js";
-import { sendEmail } from "./email.js";
+import { queueAlerts, type PendingAlert } from "./alerts.js";
+import { senderAddress } from "./senders.js";
 import type { RawMessage } from "./imap.js";
 import { extractLinks, fetchLinkedPages, fetchLinkedPdfs } from "./links.js";
 import { completePartyPrep } from "./conventions.js";
@@ -61,6 +61,18 @@ export function mentionsEvent(text: string, title: string): boolean {
 
 const MAILBOX_LABEL = { school: "Forwarded to the school inbox", alex: "Alex's own Gmail (watched)", sam: "Sam's own Gmail (watched)" };
 
+/**
+ * Mail a parent SENT (it's in their own inbox, from their own address): their outgoing message, to a
+ * teacher or a group. What it asks of its recipients isn't the family's to-do.
+ */
+export function ownOutgoing(m: FileInput): string {
+  const p = (CONFIG.parents as Record<string, { email?: string; name?: string }>)[m.mailbox];
+  const from = senderAddress(m.from);
+  const theirs = [p?.email, ...((CONFIG.workplaces as Record<string, { domains: string[] }>)[m.mailbox]?.domains || []).map((d) => `@${d}`)].filter(Boolean) as string[];
+  if (!p || !theirs.some((a) => (a.startsWith("@") ? from.endsWith(a) : from === a.toLowerCase()))) return "";
+  return `THIS IS ${m.mailbox.toUpperCase()}'S OWN OUTGOING MAIL (they wrote and sent it). What it asks of its recipients is not a to-do for the family; file only what ${m.mailbox} committed to themselves (a date they'll be somewhere, something they said they'd do), else category fyi.`;
+}
+
 export async function fileMessages(messages: FileInput[], opts: { quiet?: boolean } = {}): Promise<FileStats> {
   const stats: FileStats = { filed: 0, events: 0, updatedEvents: 0, todos: 0, alerts: 0, duplicates: 0, metaApplied: 0, metaSuggested: 0, processedKeys: [] };
   if (!messages.length) return stats;
@@ -74,7 +86,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   const newEvents: CalEvent[] = [];
   const updatedEvents: CalEvent[] = [];
   const newTodos: Todo[] = [];
-  const alerts: { title: string; summary: string }[] = [];
+  const alerts: PendingAlert[] = [];
   const today = todayLocal();
 
   // What's already on the books, so the model can recognise "the same thing
@@ -104,7 +116,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
       text: linked ? `${m.text}\n\n${linked}` : m.text,
       receivedAt: m.date,
       attachments: [...m.attachments, ...flyers],
-      context: `${profileCtx}\n\nArrived via: ${MAILBOX_LABEL[m.mailbox]}.\n\n${knownCtx()}`,
+      context: `${profileCtx}\n\nArrived via: ${MAILBOX_LABEL[m.mailbox]}.${ownOutgoing(m) ? `\n\n${ownOutgoing(m)}` : ""}\n\n${knownCtx()}`,
     });
     completePartyPrep(c, `${m.subject}\n${m.text}\n${linked}`);
 
@@ -228,7 +240,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
       eventIds,
       todoIds,
     });
-    if (c.category === "alert") alerts.push({ title: c.subject || m.subject, summary: c.summary });
+    if (c.category === "alert") alerts.push({ commId, title: c.subject || m.subject, summary: c.summary, owner: c.owner || [], at: new Date().toISOString() });
 
     try {
       const md = await applyMetadata(c.metadata, commId, m.date, trustedSender(m.from));
@@ -263,10 +275,8 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
   if (newEvents.length || updatedEvents.length) await appendItems("events", [...newEvents, ...updatedEvents]);
   if (newTodos.length) await appendItems("todos", newTodos);
 
-  if (alerts.length && !opts.quiet) {
-    const html = `<h2>⚠️ Action needed</h2><ul>${alerts.map((a) => `<li><b>${esc(a.title)}</b><br>${esc(a.summary)}</li>`).join("")}</ul><p><a href="https://your-app.vercel.app">Open the hub →</a></p>`;
-    await sendEmail(`⚠️ Family HQ: ${alerts.length} item${alerts.length > 1 ? "s" : ""} need attention`, html).catch((e) => console.error("alert email failed", e));
-  }
+  // Time-sensitive items go to the parents by text (agent.ts runAlerts), after Kimi checks each is still open.
+  if (alerts.length && !opts.quiet) await queueAlerts(alerts).catch((e) => console.error("alert queue failed", e));
 
   stats.filed = newComms.length;
   stats.events = newEvents.length;
