@@ -103,7 +103,9 @@ interface CommLike {
  */
 export function commsDuplicate(a: CommLike, b: CommLike): boolean {
   const days = Math.abs((Date.parse(a.receivedAt) - Date.parse(b.receivedAt)) / 86400000);
-  if (!(days <= 7)) return false;
+  // The same blast reaches both inboxes, or is forwarded, within a couple of days; a week apart
+  // it's next week's update.
+  if (!(days <= 2)) return false;
   const pa = peopleOf(a);
   const pb = peopleOf(b);
   const overlap = pa.length === 0 || pb.length === 0 || pa.some((k) => pb.includes(k));
@@ -127,7 +129,9 @@ export function mergeEventDetails(target: any, src: any): void {
   if (src.location !== undefined) target.location = src.location;
   if (src.prep !== undefined) target.prep = src.prep;
   if (src.date) target.date = src.date;
-  if (src.people?.length) target.people = src.people;
+  // Another message about the same event adds who it's for (one class's reminder for an event
+  // already filed for two kids doesn't take the other one off it).
+  if (src.people?.length) target.people = [...new Set([...(target.people || []), ...src.people])];
   if (src.owner?.length) target.owner = src.owner;
   settleTimes(target);
 }
@@ -155,8 +159,10 @@ export function settleTimes(e: { start?: string; end?: string; endDate?: string;
  * three sources — the school digest, a room parent's email, a calendar entry —
  * from becoming three to-dos.
  */
-export function todosSimilar(a: { title: string; due?: string }, b: { title: string; due?: string }): boolean {
+export function todosSimilar(a: { title: string; due?: string; people?: string[] }, b: { title: string; due?: string; people?: string[] }): boolean {
   if (!titlesSimilar(a.title, b.title)) return false;
+  // The same chore for different kids is two chores (a library book for each).
+  if (a.people?.length && b.people?.length && !a.people.some((p) => b.people!.includes(p))) return false;
   if (!a.due || !b.due) return !a.due && !b.due;
   return Math.abs(Date.parse(a.due) - Date.parse(b.due)) <= 3 * 86400000;
 }

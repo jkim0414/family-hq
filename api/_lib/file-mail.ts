@@ -13,6 +13,8 @@ import { inviteOf, routeTodo, holdTodo, mergeInvite } from "./invites.js";
 import { onCalendar } from "../../src/data/invites.js";
 import { queueAlerts, type PendingAlert } from "./alerts.js";
 import { senderAddress } from "./senders.js";
+import { isForward } from "./email-notes.js";
+import { parentAddresses } from "./workcal.js";
 import type { RawMessage } from "./imap.js";
 import { extractLinks, fetchLinkedPages, fetchLinkedPdfs } from "./links.js";
 import { completePartyPrep } from "./conventions.js";
@@ -56,7 +58,8 @@ const GENERIC = new Set(
 export function mentionsEvent(text: string, title: string): boolean {
   const t = text.toLowerCase();
   const words = title.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length >= 4 && !GENERIC.has(w));
-  return words.some((w) => t.includes(w));
+  // A title of only generic words ("No School", "Family Night") can't be checked this way: allow it.
+  return !words.length || words.some((w) => t.includes(w));
 }
 
 const MAILBOX_LABEL = { school: "Forwarded to the school inbox", alex: "Alex's own Gmail (watched)", sam: "Sam's own Gmail (watched)" };
@@ -65,11 +68,11 @@ const MAILBOX_LABEL = { school: "Forwarded to the school inbox", alex: "Alex's o
  * Mail a parent SENT (it's in their own inbox, from their own address): their outgoing message, to a
  * teacher or a group. What it asks of its recipients isn't the family's to-do.
  */
-export function ownOutgoing(m: FileInput): string {
-  const p = (CONFIG.parents as Record<string, { email?: string; name?: string }>)[m.mailbox];
-  const from = senderAddress(m.from);
-  const theirs = [p?.email, ...((CONFIG.workplaces as Record<string, { domains: string[] }>)[m.mailbox]?.domains || []).map((d) => `@${d}`)].filter(Boolean) as string[];
-  if (!p || !theirs.some((a) => (a.startsWith("@") ? from.endsWith(a) : from === a.toLowerCase()))) return "";
+export async function ownOutgoing(m: FileInput): Promise<string> {
+  if (m.mailbox !== "alex" && m.mailbox !== "sam") return "";
+  if (!(await parentAddresses(m.mailbox)).includes(senderAddress(m.from))) return "";
+  // A forward is them passing something along for the household — file what's forwarded.
+  if (isForward(m)) return "";
   return `THIS IS ${m.mailbox.toUpperCase()}'S OWN OUTGOING MAIL (they wrote and sent it). What it asks of its recipients is not a to-do for the family; file only what ${m.mailbox} committed to themselves (a date they'll be somewhere, something they said they'd do), else category fyi.`;
 }
 
@@ -110,24 +113,16 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
     // follow the promising ones and give the classifier the page text too.
     const links = m.links ?? extractLinks(m.text);
     const [linked, flyers] = await Promise.all([fetchLinkedPages(links).catch(() => ""), fetchLinkedPdfs(links).catch(() => [])]);
+    const own = await ownOutgoing(m);
     const c = await classify({
       from: m.from,
       subject: m.subject,
       text: linked ? `${m.text}\n\n${linked}` : m.text,
       receivedAt: m.date,
       attachments: [...m.attachments, ...flyers],
-      context: `${profileCtx}\n\nArrived via: ${MAILBOX_LABEL[m.mailbox]}.${ownOutgoing(m) ? `\n\n${ownOutgoing(m)}` : ""}\n\n${knownCtx()}`,
+      context: `${profileCtx}\n\nArrived via: ${MAILBOX_LABEL[m.mailbox]}.${own ? `\n\n${own}` : ""}\n\n${knownCtx()}`,
     });
     completePartyPrep(c, `${m.subject}\n${m.text}\n${linked}`);
-
-    // Same communication received twice (both parents get the school blast,
-    // or one of them also forwarded it)? File it once.
-    const descriptor = { receivedAt: m.date, people: c.people, subject: c.subject || m.subject, summary: c.summary };
-    if ([...existingComms, ...newComms].some((ec) => commsDuplicate(descriptor, ec))) {
-      stats.duplicates++;
-      stats.processedKeys.push(m.key);
-      continue;
-    }
 
     const commId = `comm-${m.key}`;
     const eventIds: string[] = [];
@@ -152,6 +147,16 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
       if (existingEvents.includes(target) && Object.keys(set).length && !updatedEvents.includes(target)) updatedEvents.push(target);
     }
 
+    // Same communication received twice (both parents get the school blast, or one of them also
+    // forwarded it)? File it once — but keep its corrections above: a re-sent "correction: Picture
+    // Day moved to Friday" reads as the same message and must still move the event.
+    const descriptor = { receivedAt: m.date, people: c.people, subject: c.subject || m.subject, summary: c.summary };
+    if ([...existingComms, ...newComms].some((ec) => commsDuplicate(descriptor, ec))) {
+      stats.duplicates++;
+      stats.processedKeys.push(m.key);
+      continue;
+    }
+
     // Where each of this message's events landed (new, or merged into one already filed): prep to-dos follow it.
     const placed: (CalEvent | undefined)[] = [];
     c.events.forEach((e, i) => {
@@ -170,6 +175,7 @@ export async function fileMessages(messages: FileInput[], opts: { quiet?: boolea
         owner: c.owner,
         location: e.location,
         prep: e.prep,
+        ...(typeof e.dropIn === "boolean" ? { dropIn: e.dropIn } : {}),
         source: c.source,
         commId,
         ...(invite ? { invite } : {}),

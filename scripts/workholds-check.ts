@@ -30,7 +30,8 @@ check("not after hours (a 6 PM dinner, even with the drive)", !holdable(ev("18:0
 check("a late-afternoon event that starts before 6 does", holdable(ev("17:00", "18:00"), "alex", undefined));
 check("not a repeating event", !holdable(ev("08:10", "08:40", { seriesId: "s1" }), "alex", undefined));
 check("not an all-day one", !holdable({ ...ev("08:00", "09:00"), allDay: true, start: undefined, end: undefined }, "alex", undefined));
-check("not a long come-when-you-can one (10–5)", !holdable(ev("10:00", "17:00"), "alex", undefined));
+check("not a come-and-go one (10–5 open house)", !holdable(ev("10:00", "17:00", { dropIn: true }), "alex", undefined));
+check("a long one attended start to finish is (a 9–1:30 field trip)", holdable(ev("09:00", "13:30", { dropIn: false }), "alex", undefined));
 check("not one they said not to hold", !holdable(ev("08:30", "09:30"), "alex", "no"));
 check("not an invitation still waiting on a decision", !holdable(ev("08:30", "09:30", { invite: { status: "pending" } as any }), "alex", undefined));
 check("not Sam's private event", !holdable(ev("08:30", "09:30", { privateTo: "sam" }), "alex", undefined));

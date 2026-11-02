@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 // Unit checks for tapback texts (api/_lib/reactions.ts). No network, no writes.
-const { parseReactionText, isOffer } = await import("../api/_lib/reactions");
+const { parseReactionText, isApprovalRequest } = await import("../api/_lib/reactions");
 let pass = 0, fail = 0;
 const eq = (label: string, got: unknown, want: unknown) => {
   const ok = JSON.stringify(got) === JSON.stringify(want);
@@ -23,9 +23,7 @@ eq("multi-line quote", p("Liked “line one\nline two”"), ["👍", "line one\n
 eq("ordinary text", p("I liked the zoo idea"), null);
 eq("starts with Liked but not a tapback", p("Liked the plan, let's do it"), null);
 const e = (text: string) => ({ at: "x", kind: "assistant" as const, text });
-eq("offer", isOffer(e("Nice! Want me to put a plan on the calendar?")), true);
-eq("offer with emoji", isOffer(e("Want me to grab Saturday? ☀️")), true);
-eq("statement", isOffer(e("Added swim Tuesday at 4:30.")), false);
-eq("approval is never an offer", isOffer(e("Needs your approval — Place order?\n\nReply APPROVE or DECLINE.")), false);
+eq("an offer isn't an approval request", isApprovalRequest(e("Nice! Want me to put a plan on the calendar?")), false);
+eq("an approval request is one (a tapback never answers it)", isApprovalRequest(e("Needs your approval — Place order?\n\nReply APPROVE or DECLINE.")), true);
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

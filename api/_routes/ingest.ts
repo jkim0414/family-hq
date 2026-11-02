@@ -11,6 +11,8 @@ import { fileMessages, type FileInput } from "../_lib/file-mail.js";
 import { runWatch, type WatchStats } from "../_lib/watch.js";
 import { sweepVerifiable } from "../_lib/verify.js";
 import { updateTravelTimes, checkLeaveAlerts } from "../_lib/travel.js";
+import { markDropIns } from "../_lib/dropin.js";
+import { ensureSeasonalSuggestions } from "../_lib/metadata.js";
 import { ensureGroups } from "../_lib/groupsms.js";
 import { outwardEnabled } from "../_lib/sandbox.js";
 
@@ -88,7 +90,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       console.error("watch failed", e);
     }
 
-    // Drive times for the coming week's events (hourly), and "leave by" pushes (every 5 min).
+    // Drive times and come-and-go judgments for upcoming events (hourly), and "leave by" texts (every 5 min).
     let travel: { checked: number; updated: number } | null = null;
     let leaveAlerts = 0;
     try {
@@ -99,6 +101,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (Date.now() - num(travelLast) >= 60 * 60 * 1000 && Date.now() - started < 150_000) {
         await redis.set("travel_last", Date.now());
         travel = await updateTravelTimes();
+        await markDropIns().catch((e) => console.error("drop-in judgment failed", e));
+        // Once a new school year starts: offer to move each kid up a grade (idempotent; a card in the app).
+        await ensureSeasonalSuggestions(new Date().toISOString()).catch(() => {});
       }
     } catch (e) {
       console.error("travel stage failed", e);

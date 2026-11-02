@@ -1,5 +1,5 @@
 import { converse } from "./agent.js";
-import { findQuoted, setReaction, latestKimi, isOffer, YES_EMOJI, type ParsedReaction } from "./reactions.js";
+import { findQuoted, setReaction, latestKimi, isApprovalRequest, YES_EMOJI, type ParsedReaction } from "./reactions.js";
 import type { Channel, TaskLogEntry, Member } from "../../src/data/types";
 
 /**
@@ -20,10 +20,12 @@ export async function handleReaction(
   if (!entry) return { reply: "", matched: false };
   const now = await setReaction(threadId, entry, who, emoji, { toggle: "kind" in target });
   const mine = now.find((r) => r.by === who)?.emoji;
-  if (!mine || !YES_EMOJI.has(mine) || !isOffer(entry)) return { reply: "", matched: true };
+  if (!mine || !YES_EMOJI.has(mine) || entry.kind !== "assistant" || isApprovalRequest(entry)) return { reply: "", matched: true };
   const latest = await latestKimi(threadId);
   if (!latest || latest.at !== entry.at) return { reply: "", matched: true };
-  const excerpt = entry.text.replace(/\s+/g, " ").slice(-160);
-  const { reply } = await converse(threadId, who, channel, `${mine} (a tapback on your message "…${excerpt}" — they're saying yes to what you offered)`, deadlineMs, { log: false });
+  // Whether it's a yes depends on what the message said ("just say the word" offers without a "?";
+  // a ❤️ on "Swim moved to 4?" might just be thanks): Kimi reads it, and says nothing if it's only that.
+  const excerpt = entry.text.replace(/\s+/g, " ").slice(-240);
+  const { reply } = await converse(threadId, who, channel, `${mine} (a tapback on your message "…${excerpt}". If that message offered to do something or asked a yes/no question, this is a yes: go ahead. If it was just information, it's an acknowledgment: reply with nothing.)`, deadlineMs, { log: false, silentOk: true });
   return { reply, matched: true };
 }

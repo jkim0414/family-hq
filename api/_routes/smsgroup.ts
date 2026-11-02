@@ -140,6 +140,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           await sleep(8000);
           const still = await redis.get<PendingAsk>(askKey).catch(() => null);
           if (!still || still.at !== ask.at) return; // the photo arrived and was filed with these words
+          // No photo: these words are answered on their own now, so a photo minutes later isn't paired
+          // with them (and answered twice).
+          await redis.del(askKey);
         }
 
         // Several texts in a row from one person: answer them once, together.

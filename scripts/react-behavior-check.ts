@@ -27,8 +27,10 @@ let i = 0;
 for (const [label, who, msg, want] of CASES) {
   const id = `task-verify-react-${stamp}-${i++}`;
   const t: any = agent.newTask(id, "test", who, "app");
-  const prior = "It's Saturday 11–2 at the school field! ☀️";
-  (t.thread as any[]).push({ role: "user", content: `[${who === "alex" ? "Alex" : "Sam"} · app · earlier]\nWhat time is the school picnic?` }, { role: "assistant", content: prior });
+  // An earlier answer with no checkable facts in it: one Kimi can't find in the data would draw a
+  // correction instead of the reaction being tested.
+  const prior = "An indoor picnic and a blanket fort would be a hit! 🏰";
+  (t.thread as any[]).push({ role: "user", content: `[${who === "alex" ? "Alex" : "Sam"} · app · earlier]\nAny ideas for a rainy afternoon with the kids?` }, { role: "assistant", content: prior });
   t.log.push({ at: new Date(Date.now() - 60000).toISOString(), kind: "assistant", text: prior });
   agent.addUserMessage(t, who, "app", msg);
   await db.saveTask(t);

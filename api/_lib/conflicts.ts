@@ -52,7 +52,11 @@ function isThisEvent(b: WorkBlock, e: CalEvent, w: { from: Date; to: Date }): bo
   if (titlesSimilar(b.title, e.title)) return true;
   const near = +new Date(b.start) < +w.to + 3600000 && +new Date(b.end) > +w.from - 3600000;
   const mine = distinctive(e.title);
-  return near && [...distinctive(b.title)].some((x) => mine.has(x));
+  // Two distinctive words in common ("Kid's science fair" / "Science Fair Judging"), or the event's
+  // only one: a single shared word is a coincidence ("Parent-teacher conference" / "Conference call
+  // w/ vendor").
+  const shared = [...distinctive(b.title)].filter((x) => mine.has(x)).length;
+  return near && shared >= 1 && shared >= Math.min(2, mine.size);
 }
 
 /** The parent put this event on their own work calendar: they've planned for it. */
@@ -69,21 +73,23 @@ export function clashesFor(e: CalEvent, p: Parent, blocks: WorkBlock[]): Clash[]
   const k = (kind: string, b?: WorkBlock) => `${p}|${kind}|${b ? (series ? normTitle(b.title) : `${normTitle(b.title)}|${b.start}`) : series ? "" : w.day}`;
   const overlaps = (b: WorkBlock) => +new Date(b.start) < +w.to && +new Date(b.end) > +w.from;
   const day = blocks.filter((b) => (b.allDay ? b.start.slice(0, 10) <= w.day && w.day < b.end.slice(0, 10) : blockDay(b) === w.day));
-  // A long, come-when-you-can event (a fundraiser night, an open house): only being away rules it out.
-  const long = +w.to - +w.from > (3 * 60 + 2 * (e.travelMin ?? DEFAULT_TRAVEL_MIN)) * 60000;
+  // A come-and-go event (a fundraiser night, an open house): only being away rules it out.
+  const long = !!e.dropIn;
   const out: Clash[] = [];
   for (const b of day) {
     if (b.kimiHold) continue; // Kimi's own hold for a family event: never a conflict (nor a sign they planned it)
     if (!b.allDay && isThisEvent(b, e, w)) continue; // the event itself, on their work calendar
-    if (b.outOfOffice && (b.allDay || overlaps(b))) out.push({ parent: p, kind: "out", key: k("out", b), line: `out of office${b.allDay ? " all day" : ` ${span(b)}`} ("${b.title}")` });
-    else if (b.trip && (b.allDay || overlaps(b))) out.push({ parent: p, kind: "trip", key: k("trip", b), line: `traveling: "${b.title}" ${b.allDay ? "all day" : span(b)}` });
+    // Off work (PTO, a school holiday) is time free for the family, often taken for this very event — not a clash.
+    if (b.outOfOffice) continue;
+    if (b.trip && (b.allDay || overlaps(b))) out.push({ parent: p, kind: "trip", key: k("trip", b), line: `traveling: "${b.title}" ${b.allDay ? "all day" : span(b)}` });
     // (An entry Kimi can't place — maybe a hold — isn't a conflict on its own; it shows in the day's context.)
     else if (!long && !b.allDay && !b.hold && !b.unsure && overlaps(b)) out.push({ parent: p, kind: "meeting", key: k("meeting", b), line: `"${b.title}" ${span(b)}${where(b) ? ` (${where(b)})` : ""}` });
   }
   // An office day: from the commute in until the commute home starts (just one commute: only during it —
   // when the day ends isn't known, and the meetings speak for themselves).
   const commutes = day.filter((b) => b.travel && !b.trip && !b.allDay).sort((a, b) => a.start.localeCompare(b.start));
-  if (!long && commutes.length && !out.some((c) => c.kind === "out" || c.kind === "trip")) {
+  const off = day.some((b) => b.outOfOffice && (b.allDay || overlaps(b)));
+  if (!long && !off && commutes.length && !out.some((c) => c.kind === "trip")) {
     const first = commutes[0], last = commutes[commutes.length - 1];
     const officeFrom = new Date(first.start);
     const officeTo = new Date(commutes.length > 1 ? last.start : first.end);
@@ -98,7 +104,10 @@ export function clashesFor(e: CalEvent, p: Parent, blocks: WorkBlock[]): Clash[]
 export function responsibleFor(e: CalEvent): { parents: Parent[]; anyOne: boolean } {
   if (e.privateTo && (PARENTS as readonly string[]).includes(e.privateTo)) return { parents: [e.privateTo as Parent], anyOne: false };
   const named = (e.owner || []).filter((o): o is Parent => (PARENTS as readonly string[]).includes(o));
-  return named.length ? { parents: named, anyOne: false } : { parents: [...PARENTS] as Parent[], anyOne: true };
+  if (named.length) return { parents: named, anyOne: false };
+  // Someone else has it (Grandma's taking him): nothing for the parents' work days.
+  if ((e.owner || []).length) return { parents: [], anyOne: false };
+  return { parents: [...PARENTS] as Parent[], anyOne: true };
 }
 
 export interface Flag {

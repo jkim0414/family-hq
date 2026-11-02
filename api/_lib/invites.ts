@@ -25,18 +25,23 @@ export function inviteOf(e: ClassEvent): Invite | undefined {
 }
 
 // To-dos that ask the parents to decide or RSVP: for an invitation, Kimi asks them instead.
-const ASK_TODO_RE = /\b(rsvp|decide|whether to (go|attend)|consider (going|attending)|sign up to attend|let .* know if)\b/i;
+// About going to something: never a to-do when the message has an invitation (the parents are asked).
+const ATTEND_TODO_RE = /\b(rsvp|whether to (go|attend)|consider (going|attending)|sign up to attend)\b/i;
+// A decision in general: dropped only when it's about the invitation itself.
+const DECIDE_TODO_RE = /\b(decide|let .* know if)\b/i;
 
 /**
  * Where a filed to-do goes: as usual, held on its invitation until a yes (prep), or dropped (a
  * "decide/RSVP" to-do for an invitation, or prep for one the family declined).
  */
 export function routeTodo(t: ClassTodo, eventFor: (i: number) => CalEvent | undefined, invitationsHere: boolean, placed: (CalEvent | undefined)[] = []): "create" | "drop" | CalEvent {
-  // Which event it's prep for: as the model said, or — when it didn't say — the message's only
-  // invitation, or the invitation whose title shares a name with it ("Buy a gift for Maya" → Maya's party).
+  // Which event it's prep for: as the model said, or — when it didn't say — the invitation whose
+  // title shares a name with it ("Buy a gift for Maya" → Maya's party). Not just "the message's only
+  // invitation": a newsletter's permission slip isn't prep for the PTA meeting it also mentions.
   const target = typeof t.forEvent === "number" ? eventFor(t.forEvent) : invitationsHere ? guessEvent(t.title, placed) : undefined;
   // "RSVP / decide" to-dos for an invitation are never made: the parents are asked directly.
-  if (invitationsHere && ASK_TODO_RE.test(t.title)) return "drop";
+  if (invitationsHere && ATTEND_TODO_RE.test(t.title)) return "drop";
+  if (target?.invite && DECIDE_TODO_RE.test(t.title)) return "drop";
   if (target?.invite) {
     if (target.invite.status === "pending") return target;
     if (target.invite.status !== "yes") return "drop";
@@ -48,7 +53,6 @@ const NAME_RE = /\b[A-Z][a-z]+(?:\s[A-Z][a-z]+)?/g;
 const STOP_NAMES = new Set(["Buy", "Get", "Pack", "Wrap", "Write", "Make", "Order", "Bring", "Pick", "Costumes", "Gift", "Card", "Party", "Birthday", "The", "For", "RSVP"]);
 function guessEvent(title: string, placed: (CalEvent | undefined)[]): CalEvent | undefined {
   const invites = placed.filter((e): e is CalEvent => !!e?.invite);
-  if (invites.length === 1) return invites[0];
   const names = (title.match(NAME_RE) || []).flatMap((n) => n.split(" ")).filter((n) => !STOP_NAMES.has(n));
   return invites.find((e) => names.some((n) => new RegExp(`\\b${n}\\b`).test(e.title)));
 }

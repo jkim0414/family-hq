@@ -6,6 +6,7 @@ import type { Attachment } from "./imap.js";
 import { PREP_CONVENTIONS, NAME_COLLISIONS } from "./conventions.js";
 import { settleTimes } from "./util.js";
 import type { Category, Source, HouseholdProfile } from "../../src/data/types";
+import { workplaceOf } from "./workcal.js";
 
 /** Compact household-profile summary injected so the model can infer to-dos. */
 export function profileContext(p?: HouseholdProfile | null, opts: { withIds?: boolean } = {}): string {
@@ -61,6 +62,8 @@ export interface Classification {
     rsvp?: string; // how to RSVP: a link, an email address, instructions
     /** The household facts say the family skips this kind of event. */
     skip?: boolean;
+    /** A long event people come and go from rather than attend start to finish. */
+    dropIn?: boolean;
   }[];
   todos: {
     title: string;
@@ -111,14 +114,14 @@ THE FAMILY (ids; add guests by their name as free text, e.g. "Grandma"). EDIT th
 - sam — parent (Alex's partner)
 {{KIDS}}
 
-PARENTS' WORK IS NOT FAMILY BUSINESS: ${Object.entries(CONFIG.workplaces).map(([p, w]) => `${p} works at ${w.org} (${w.domains.join(", ")})`).join("; ")}. A parent's own job — meetings, events at their workplace (even ones that look like family events, like a family night held at their workplace), colleagues' mail — is category fyi with NO events and NO to-dos, unless it changes the kids' logistics (then only a to-do about coverage).
+PARENTS' WORK IS NOT FAMILY BUSINESS: ${Object.keys(CONFIG.workplaces).map((p) => `${p} works at ${workplaceOf(p)}`).join("; ")}. Judge by what a message is about, not its sender: something a parent forwards from a work address can be family business, and a workplace's mail is about its own people and business even when it looks like family mail (an employer with events, classes, or programs of its own). A parent's own job — meetings, events at their workplace (even ones that look like family events, like a family night held at their workplace), colleagues' mail — is category fyi with NO events and NO to-dos, unless it changes the kids' logistics (then only a to-do about coverage).
 
 TWO DIFFERENT "WHO" FIELDS — set both:
 - "people" = who the item is FOR / about. Usually the kid(s); a guest for their visit; a parent if it's genuinely about them. e.g. a brown bag for Theo's class → ["theo"]; Grandma's flight → ["grandma"].
-- "owner" = who is RESPONSIBLE for acting on it — almost always a parent (alex and/or sam). INFER the specific parent when the text says (or strongly implies) who: "Sam is doing pickups" / "Sam's got it" → ["sam"]; "I'll grab it" / "I'm handling X" → ["alex"] (notes are written by Alex). Only when it's genuinely ambiguous who does it, default to BOTH ["alex","sam"]. For pure FYI with nothing to do, owner = []. For a parent's own errand ("Alex get gas") → owner=["alex"].
+- "owner" = who is RESPONSIBLE for acting on it — almost always a parent (alex and/or sam). INFER the specific parent when the text says (or strongly implies) who: "Sam is doing pickups" / "Sam's got it" → ["sam"]; "I'll grab it" / "I'm handling X" → the person writing (see below). Only when it's genuinely ambiguous who does it, default to BOTH ["alex","sam"]. For pure FYI with nothing to do, owner = []. For a parent's own errand ("Alex get gas") → owner=["alex"].
 Examples: "send a labeled brown bag for Theo" → people=["theo"], owner=["alex","sam"] (unspecified). "Sam has all pickups Tuesday" → owner=["sam"].
 
-The person typing/forwarding is ALEX — first person ("I", "me", "my") = alex.
+Who is writing: first person ("I", "me", "my") is whoever wrote or forwarded this — the "Written by" line when there is one, else the parent whose address it's from. In an email, an "I" inside the forwarded part is its original sender, not a parent.
 
 SCOPE — this is NOT just school. Handle any household logistics: errands & chores, scheduling decisions ("decide which day to go to the Fair, then tell friends"), travel & arrivals (someone's flight/visit), appointments, who's-covering-dropoff notes, social plans, deliveries, renewals, etc. — alongside school comms.
 
@@ -166,7 +169,7 @@ INVITATIONS (decide first): the family decides whether to go BEFORE anything goe
 - invitation=true for anything they're INVITED to and may or may not attend: birthday parties and other parties, district/board/PTA/advisory/committee meetings, info nights and family input sessions, community events, fundraisers and spirit nights, optional workshops, volunteer sign-ups, playdates someone proposed. Set rsvpBy and rsvp when stated (copy an RSVP link exactly).
 - invitation=false (a FIXED date) for what happens regardless: no-school days and breaks, a game or practice already on a schedule, appointments, picture day, field trips and class events the kids are in, a visitor's arrival, anything the parent's note says they're going to or asks to put on the calendar.
 - For an invitation, do NOT add "RSVP", "decide whether to attend", or "consider going" to-dos: the parents are asked directly. Prep to-dos (buy a gift, pack treats, costume) still go in todos with forEvent = that event's index; they wait for a yes.
-- If HOUSEHOLD FACTS say the family skips this kind of event ("we don't go to PTA committee meetings"), set skip=true too.
+- HOUSEHOLD FACTS decide for a kind of event they cover: one the family skips ("we skip <kind of event>") → also skip=true; one they say always goes on the calendar ("always put <kind of event> on the calendar") → invitation=false.
 
 EVENTS vs TO-DOS (important — keep the calendar uncluttered):
 - A calendar EVENT is something that HAPPENS at a date/time/place the family should see on a calendar: a party, Field Day, Picture Day, a performance, an appointment, a visitor's arrival, a no-school day, an offsite/coverage day.
@@ -178,10 +181,10 @@ EVENTS vs TO-DOS (important — keep the calendar uncluttered):
 
 RULES:
 - Default to fyi unless there is a real action or a real date.
-- WHICH KIDS: an event for some grades, classes, or ages ("3rd–5th grade", "Preschool, TK/K", "Room 7", "upper elementary") is only for the kids in them — match each kid's grade/program in THE FAMILY (TK comes before K). Set the event's own "people" to just those kids. If none of the kids are in it, don't file it as an event (at most mention it in the summary). When the message gives times by grade or group, file ONE timed event (not one per kid, not all-day) spanning only the kids' own slots: start = the earliest of their slots, end = the start of the group after their last slot. E.g. "7:45 grades 6–8; 8:15 TK/K; 8:40 1st and 2nd; 9:05 3rd and 4th; 9:30 5th" with a kindergartner and a 3rd grader → start 08:15, end 09:30, allDay=false, people = those two, prep "TK/K 8:15 (name); 3rd & 4th 9:05 (name)". Those times ARE stated by the message — not a guess. This holds for an update to an event already filed, too. But separate ACTIVITIES on one day, each for its own grades at its own time and place ("Poetry Walk (1st/2nd) 8:45 library; Science Fair (3rd–5th) 10:15 gym; Pet Parade (TK/K) 1:30 field"), are separate events — one per activity a kid is in (with a kindergartner and a 3rd grader: the parade and the science fair; nothing for 1st/2nd) — never merged into one, and never skipped because the heading says "save the date".
+- WHICH KIDS: an event for some grades, classes, or ages ("3rd–5th grade", "Preschool, TK/K", "Room 7", "upper elementary") is only for the kids in them — match each kid's grade/program in THE FAMILY (a transitional or pre-K year comes before K). A kid at another school or a daycare is in none of this school's grades. Set the event's own "people" to just those kids. If none of the kids are in it, don't file it as an event (at most mention it in the summary). When the message gives times by grade or group, file ONE timed event (not one per kid, not all-day) spanning only the kids' own slots: start = the earliest of their slots, end = the start of the group after their last slot. E.g. slots "A 8:00; B 8:30; C 9:00; D 9:30", with one kid in B and one in C → start 08:30, end 09:30, allDay=false, people = those two, prep "B 8:30 (name); C 9:00 (name)". Those times ARE stated by the message — not a guess. This holds for an update to an event already filed, too. But separate ACTIVITIES on one day, each for its own grades at its own time and place (a walk for some grades in the library, a fair for others in the gym, a parade for others on the field), are separate events — one for each activity any of the kids is in, none for the rest — never merged into one, and never skipped because the heading says "save the date".
 - TIMES: an event with a stated start time is never all-day. Give it an end: the stated one, or — when none is given — your best estimate of how long that kind of thing runs (a parade, assembly, or drop-in viewing ~30 min; a performance or meeting ~1 h; a party ~2 h; a game ~1 h). An all-day block is only for things with no time at all (no school, a break, a dress-up day); a timed event filed all-day hides it on the calendar and from conflict checks.
 - NEWSLETTERS AND DIGESTS BURY REAL EVENTS. Read every paragraph of a teacher post, digest, or newsletter: any dated thing the kids take part in (a parade, performance, field trip, spirit or dress-up day, picture day, class party, early dismissal) is an event to file even when the rest of the post is chit-chat, and even when details are "still being finalized" — file it all-day with what's known (never invent a time the message doesn't give), put the dress/bring rules in "prep", and note that details are to come. A message that announces such an event is category "calendar", not "fyi".
-- SCHOOL FUNDRAISER DINE-OUT NIGHTS (restaurant giveback or spirit nights) are events the family wants on the calendar: file each with the restaurant name, address (from the flyer if attached), and hours, and put how the donation counts (show the flyer, promo code, order online) in "prep".
+- A restaurant fundraiser night: the restaurant name, address (from the flyer if attached), and hours go on the event, and how the donation counts (show the flyer, promo code, order online) in "prep".
 - MULTI-DAY: a date range (Spring Break Mar 22–26, a camp week, a trip, a visit) is ONE all-day event with date = the first day and endDate = the last day (inclusive) — not just the first day, and not one event per day. (If each day has its own times, as in a camp with daily hours, still one span; put the daily hours in prep.)
 - Extract events with concrete dates only; resolve relative dates ("this Friday", "tomorrow") against the item's received date (provided). Output YYYY-MM-DD.
 - FLIGHTS: model a flight as ONE timed event spanning departure→arrival. date + start = the DEPARTURE date/time; end = the ARRIVAL time; endDate = the arrival date ONLY if it lands on a different day (red-eye). Set startTz to the DEPARTURE airport's IANA zone and endTz to the ARRIVAL airport's IANA zone (e.g. LAX → "America/Los_Angeles", EWR/JFK → "America/New_York", ORD → "America/Chicago", DEN → "America/Denver", SEA → "America/Los_Angeles"). Put the flight number in the title or location. This makes the calendar show true block time across zones. A round-trip itinerary = TWO separate flight events (outbound + return). Example: "UA 100 ORD 9:15 AM → BOS 12:40 PM, Jun 19" → {date:"2026-06-19", start:"09:15", end:"12:40", startTz:"America/Chicago", endTz:"America/New_York", title:"Depart for Boston — UA 100", location:"ORD → BOS"}.
@@ -202,6 +205,12 @@ const TOOL: Anthropic.Tool = {
   input_schema: {
     type: "object",
     properties: {
+      // First, so the filing below is checked against the whole message: newsletters bury items.
+      inventory: {
+        type: "array",
+        items: { type: "string" },
+        description: "Before anything else, every dated thing the message mentions, in order, one line each: what, when, and which of our kids it's for (or \"none of ours\"). Then file each one that's ours below.",
+      },
       category: { type: "string", enum: ["fyi", "calendar", "action", "alert"] },
       people: {
         type: "array",
@@ -253,6 +262,7 @@ const TOOL: Anthropic.Tool = {
             rsvpBy: { type: "string", description: "YYYY-MM-DD RSVP deadline, if stated" },
             rsvp: { type: "string", description: "How to RSVP: the RSVP link (copied exactly from the message or linked page), an email address, or one-line instructions" },
             skip: { type: "boolean", description: "true when HOUSEHOLD FACTS say the family doesn't attend this kind of event" },
+            dropIn: { type: "boolean", description: "For an event over 3 hours: true when people come and go whenever suits them (an open house, a festival, \"stop by any time\"); false when it's attended start to finish (a field trip, a tournament, a workshop)." },
           },
           required: ["title", "date", "allDay"],
         },
@@ -366,7 +376,7 @@ const TOOL: Anthropic.Tool = {
         },
       },
     },
-    required: ["category", "people", "owner", "source", "subject", "summary", "reason", "events", "todos", "updates", "deletes", "metadata"],
+    required: ["inventory", "category", "people", "owner", "source", "subject", "summary", "reason", "events", "todos", "updates", "deletes", "metadata"],
   },
 };
 
@@ -450,15 +460,20 @@ ${input.text}${note}`,
 export function timeStated(text: string, hhmm: string): boolean {
   const [h, m] = hhmm.split(":").map(Number);
   if (!Number.isFinite(h) || !Number.isFinite(m)) return false;
-  const t = text.toLowerCase();
+  // Dates aren't times: "Oct 10", "10/24", "the 10th".
+  const t = text
+    .toLowerCase()
+    .replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b/g, " ")
+    .replace(/\b\d{1,2}\/\d{1,2}(\/\d{2,4})?\b/g, " ");
   const h12 = ((h + 11) % 12) + 1;
   const mm = String(m).padStart(2, "0");
   if (h === 12 && m === 0 && /\bnoon\b/.test(t)) return true;
-  const ampm = "(a\\.?m\\.?|p\\.?m\\.?)";
+  if (h === 0 && m === 0 && /\bmidnight\b/.test(t)) return true;
   // (?!\d), not \b, after the minutes: there's no word break between "9:10" and "am".
-  const pats = [`\\b${h12}:${mm}(?!\\d)`, `\\b${String(h).padStart(2, "0")}:${mm}(?!\\d)`, `\\b${h12}\\.${mm}\\s*${ampm}`];
-  if (m === 0) pats.push(`\\b${h12}\\s*${ampm}`, `\\b${h12}\\s*o'?clock`, `\\bat ${h12}\\b`, `\\b${h12}\\s*[-–—]\\s*\\d{1,2}(:\\d\\d)?\\s*${ampm}`);
-  return pats.some((p) => new RegExp(p).test(t));
+  if (new RegExp(`\\b(${h12}|${String(h).padStart(2, "0")})[:.]${mm}(?!\\d)`).test(t)) return true;
+  // On the hour, the bare number is enough ("2 to 4 PM", "Sat 2-4", "at 2", "2pm"): this only
+  // catches a time the message never mentions at all.
+  return m === 0 && new RegExp(`\\b${h12}(?![\\d:/]|st|nd|rd|th)`).test(t);
 }
 
 const VERIFY_TOOL: Anthropic.Tool = {

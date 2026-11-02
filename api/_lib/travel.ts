@@ -1,4 +1,4 @@
-import { canSee } from "./privacy.js";
+import { canSee, privateThreadId } from "./privacy.js";
 import { onCalendar } from "../../src/data/invites.js";
 import { redis, getProfile, getCollection, setCollection } from "./db.js";
 import { notify } from "./notify.js";
@@ -138,9 +138,9 @@ export async function updateTravelTimes(max = 8): Promise<{ checked: number; upd
 }
 
 /**
- * Every few minutes: a push ~10 minutes before it's time to leave for today's events
- * that are a real drive away (10 min – 3 h). To the event's responsible parents, else both.
- * Push only — an email would arrive too late to matter.
+ * Every few minutes: a text ~10 minutes before it's time to leave for today's events
+ * that are a real drive away (10 min – 3 h). To the event's responsible people, else both parents
+ * — each one-on-one, noted in their own chat so a reply ("running late") has the context.
  */
 export async function checkLeaveAlerts(): Promise<number> {
   const events = await getCollection("events");
@@ -161,7 +161,11 @@ export async function checkLeaveAlerts(): Promise<number> {
     // Only people who may see the event (one kept in a chat never reaches someone outside it).
     const to: Member[] = (e.privateTo ? [e.privateTo] : owners.length ? owners : e.audience?.length ? e.audience : (["alex", "sam"] as Member[])).filter((m) => canSee(e, m));
     const text = `🚗 Leave by ${fmt12(leave)} for ${e.title} (about ${e.travelMin} min drive${e.location ? ` to ${e.location}` : ""}).`;
-    for (const p of to) await notify(p, text, "app", { emailFallback: false }).catch((err) => console.error("leave alert failed", err));
+    const { postAsKimi } = await import("./agent.js");
+    for (const p of to) {
+      await notify(p, text, "sms", { emailFallback: false }).catch((err) => console.error("leave alert failed", err));
+      await postAsKimi(privateThreadId(p), text, "texted this leave-by reminder").catch(() => {});
+    }
     sent++;
   }
   return sent;

@@ -1,8 +1,10 @@
 import { recordUsage } from "./usage.js";
 import Anthropic from "@anthropic-ai/sdk";
-import { redis } from "./db.js";
+import { redis, getCollection } from "./db.js";
 import { CONFIG } from "../../src/data/config.js";
 import { KNOWN_SENDERS, senderAddress } from "./senders.js";
+import { isForward } from "./email-notes.js";
+import { parentAddresses, workplaceOf } from "./workcal.js";
 import { fetchRecent, inboxConfigured, type RecentMessage } from "./imap.js";
 import { fileMessages, type FileInput } from "./file-mail.js";
 import { recordReceipts } from "./receipts.js";
@@ -39,14 +41,18 @@ const CONDITIONAL_SENDERS: { from: RegExp; subject: RegExp }[] = [
 ];
 // Never worth a look, even by the triage model.
 const IGNORE_SENDERS: RegExp[] = [
-  /accounts\.google\.com|no-?reply@google/i,
+  // Google's own account notices — not a person sharing a sign-up sheet (drive-shares-…-noreply@google.com).
+  /accounts\.google\.com|(^|[<\s"])no-?reply@google\.com/i,
   /calendar-notification@google\.com/i,
   /mailer-daemon|postmaster/i,
   /assistant@example\.com/i, // Kimi's own mail (digests, alerts)
   /noreply@(github|vercel|linear|slack|notion|figma)\.com/i,
 ];
-// Google Calendar traffic is already mirrored from the Personal calendar.
-const IGNORE_SUBJECTS: RegExp[] = [/^(Invitation|Updated invitation|Accepted|Declined|Tentatively accepted|Canceled event|Cancelled event|New event):/i];
+// Replies to calendar invitations are noise. An invitation itself is only noise when one of us sent
+// it (the family calendar mirrors those); another family's invitation is never mirrored until
+// accepted, so the email is how it reaches Kimi.
+const IGNORE_SUBJECTS: RegExp[] = [/^(Accepted|Declined|Tentatively accepted):/i];
+const CALENDAR_INVITE_RE = /^(Invitation|Updated invitation|Canceled event|Cancelled event|New event):/i;
 
 const client = new Anthropic();
 
@@ -92,27 +98,38 @@ function kidNamesRe(): RegExp {
   return new RegExp(`\\b(${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\b`, "i");
 }
 
-function ignorable(m: RecentMessage): boolean {
-  return IGNORE_SENDERS.some((re) => re.test(m.from)) || IGNORE_SUBJECTS.some((re) => re.test(m.subject));
+function ignorable(m: RecentMessage, family: Set<string> = new Set()): boolean {
+  return IGNORE_SENDERS.some((re) => re.test(m.from)) || IGNORE_SUBJECTS.some((re) => re.test(m.subject)) || (CALENDAR_INVITE_RE.test(m.subject) && family.has(senderAddress(m.from)));
 }
 
-function directlyRelevant(m: RecentMessage, kids: RegExp): boolean {
+function directlyRelevant(m: RecentMessage, kids: RegExp, family: Set<string> = new Set()): boolean {
   // By the address, not the display name ("myschool.org" <anyone@anywhere> isn't the school).
   const addr = senderAddress(m.from);
+  // A parent forwarding something (from any of their addresses, work included) is passing it along
+  // for the household, whatever address it came from.
+  if (family.has(addr) && isForward(m)) return true;
   return KNOWN_SENDERS.some((re) => re.test(addr)) || CONDITIONAL_SENDERS.some((c) => c.from.test(addr) && c.subject.test(m.subject)) || kids.test(m.subject);
+}
+
+/** Every address the parents send from. */
+async function familyAddresses(): Promise<Set<string>> {
+  return new Set((await Promise.all((Object.keys(CONFIG.parents) as Parent[]).map(parentAddresses))).flat());
 }
 
 /** Headers + a short excerpt → which of these are about the household? (indices) */
 async function triage(msgs: RecentMessage[]): Promise<Set<number>> {
   if (!msgs.length) return new Set();
-  const kids = KIDS.map((k) => `${k.firstName} (${k.current.program}, ${k.current.school})`).join("; ");
-  const lines = msgs.map((m, i) => `${i}. From: ${m.from.slice(0, 80)} | Subject: ${m.subject.slice(0, 120)} | Excerpt: ${m.text.replace(/\s+/g, " ").slice(0, 160)}`);
+  // The live roster (grades change every fall), not the seed file's.
+  const roster = await getCollection("kids").catch(() => []);
+  const kids = (roster.length ? roster : KIDS).map((k) => `${k.firstName || k.id} (${k.current.program}, ${k.current.school})`).join("; ");
+  const lines = msgs.map((m, i) => `${i}. From: ${m.from.slice(0, 80)} | Subject: ${m.subject.slice(0, 120)} | Excerpt: ${m.text.replace(/\s+/g, " ").slice(0, 300)}`);
   const res = await client.messages.create({
     model: TRIAGE_MODEL,
     max_tokens: 300,
     system: `You triage a family's email for their household assistant. Kids: ${kids}. Parents: Alex and Sam.
 Mark an email RELEVANT only if it is about: the kids (school, teachers, classes, activities, sports, camps, daycare, playdates, birthday invitations, health/appointments), family logistics (appointments, deliveries the family must act on, travel itineraries, reservations, household services like cleaners/repairs), or something a parent must do by a date for the household.
-NOT relevant: work email — including anything about a parent's own job or workplace (${Object.entries(CONFIG.workplaces).map(([p, w]) => `${p === "alex" ? "Alex" : "Sam"}: ${w.org}, ${w.domains.join("/")}`).join("; ")}): meetings and events at their workplace, colleagues' mail — finance/banking/investing/statements/credit, marketing and promotions, newsletters, receipts for routine purchases, social media, software/service notifications, political/charity asks, personal correspondence with no household action.
+A parent forwarding something ("Fwd:"), even from their work address, is passing it along for the household: judge it by what's forwarded, not the sender.
+NOT relevant: work email — including anything about a parent's own job (${Object.keys(CONFIG.workplaces).map((p) => `${p === "alex" ? "Alex" : "Sam"} works at ${workplaceOf(p)}`).join("; ")}): meetings and events at their workplace, colleagues' mail. Judge by what the email is about, not who sent it: a workplace's mail is about its own people and business even when it looks like family mail (an employer with events, classes, or programs of its own) — finance/banking/investing/statements/credit, marketing and promotions, businesses' newsletters (a school, class, PTA, daycare, or activity newsletter IS relevant: they bury dates), receipts for routine purchases, social media, software/service notifications, political/charity asks, personal correspondence with no household action.
 Reply with ONLY a JSON array of the relevant indices, e.g. [0,3]. Empty array if none.`,
     messages: [{ role: "user", content: lines.join("\n") }],
   });
@@ -126,11 +143,12 @@ Reply with ONLY a JSON array of the relevant indices, e.g. [0,3]. Empty array if
 /** What a watch pass WOULD file for one parent, without filing or marking anything (for tuning the gates). */
 export async function previewWatch(p: Parent, days = LOOKBACK_DAYS): Promise<{ direct: RecentMessage[]; relevant: RecentMessage[]; ignored: RecentMessage[]; triagedOut: RecentMessage[] }> {
   const kids = kidNamesRe();
+  const family = await familyAddresses();
   const msgs = await fetchRecent(p, { days, max: 120, seen: async () => new Set() });
-  const ignored = msgs.filter((m) => ignorable(m));
+  const ignored = msgs.filter((m) => ignorable(m, family));
   const candidates = msgs.filter((m) => !ignored.includes(m));
-  const direct = candidates.filter((m) => directlyRelevant(m, kids));
-  const rest = candidates.filter((m) => !directlyRelevant(m, kids));
+  const direct = candidates.filter((m) => directlyRelevant(m, kids, family));
+  const rest = candidates.filter((m) => !directlyRelevant(m, kids, family));
   const keep = rest.length ? await triage(rest) : new Set<number>();
   return { direct, relevant: rest.filter((_, i) => keep.has(i)), triagedOut: rest.filter((_, i) => !keep.has(i)), ignored };
 }
@@ -153,6 +171,7 @@ export async function runWatch(opts: { quiet?: boolean; budgetMs: number; pre?: 
   stats.ran = true;
   const deadline = Date.now() + opts.budgetMs;
   const kids = kidNamesRe();
+  const family = await familyAddresses();
 
   try {
     for (const p of active) {
@@ -166,9 +185,9 @@ export async function runWatch(opts: { quiet?: boolean; budgetMs: number; pre?: 
           seen: seenLookup(p),
         });
         s.fetched = msgs.length;
-        const candidates = msgs.filter((m) => !ignorable(m));
-        const direct = candidates.filter((m) => directlyRelevant(m, kids));
-        const rest = candidates.filter((m) => !directlyRelevant(m, kids));
+        const candidates = msgs.filter((m) => !ignorable(m, family));
+        const direct = candidates.filter((m) => directlyRelevant(m, kids, family));
+        const rest = candidates.filter((m) => !directlyRelevant(m, kids, family));
         s.direct = direct.length;
         s.triaged = rest.length;
         const keep = rest.length ? await triage(rest) : new Set<number>();

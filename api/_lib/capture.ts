@@ -20,6 +20,8 @@ import type { Member, CalEvent, Comm, Todo, Suggestion } from "../../src/data/ty
 
 export interface CaptureInput {
   text: string;
+  /** Who typed or sent it ("Alex"), so "I'll take it" is them. */
+  by?: string;
   images?: { mediaType?: string; data: string }[];
   /** Suppress calendar guest invites (verification tests must not email Sam). */
   silent?: boolean;
@@ -138,7 +140,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
 
   const linked = text ? await fetchLinkedPages(extractLinks(text)).catch(() => "") : "";
   const c = await classify({
-    from: "Quick add (in app)",
+    from: input.by ? `Written by ${input.by} (quick add)` : "Quick add (in app)",
     subject: "Quick note",
     text: (text || "(see attached image)") + (linked ? `\n\n${linked}` : ""),
     receivedAt: `${today}T12:00:00`, // anchor relative dates to the local day
@@ -294,6 +296,7 @@ export async function runCapture(input: CaptureInput): Promise<CaptureResult> {
       owner: c.owner,
       location: e.location,
       prep: e.prep,
+      ...(typeof e.dropIn === "boolean" ? { dropIn: e.dropIn } : {}),
       source: c.source,
       commId,
       ...(invite ? { invite } : {}),

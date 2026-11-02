@@ -22,6 +22,7 @@ import { profileContext } from "./classify.js";
 import { searchFlights, searchHotels, searchPlaces } from "./search.js";
 import { runCapture, describeCapture } from "./capture.js";
 import { recordUsage } from "./usage.js";
+import { isForward } from "./email-notes.js";
 import { personName } from "../../src/data/people.js";
 import { TRAVELER_IDS, listTravelers, saveTraveler, travelSecret, travelersText, type TravelerPatch } from "./travelers.js";
 import { FACT_TOPIC_IDS, isFactTopic, newFactId, topicLabel, factText } from "../../src/data/facts.js";
@@ -35,8 +36,8 @@ import { createFile, updateFile, fileUrl } from "./files.js";
 import { searchMail, readMail, inboxConfigured } from "./imap.js";
 import { gmailConnected, searchGmail, readGmail } from "./gmail.js";
 import * as web from "./browser.js";
-import { readUrl } from "./links.js";
-import { getWorkCalConfig, getWorkBlocks, formatBlocks } from "./workcal.js";
+import { readUrl, pickLinks } from "./links.js";
+import { getWorkCalConfig, getWorkBlocks, formatBlocks, workplaceOf } from "./workcal.js";
 import { findConflicts, type Flag } from "./conflicts.js";
 import { pendingAlerts, clearAlerts, type PendingAlert } from "./alerts.js";
 import { syncWorkHolds, setHoldPref, holdParents, takeNewHolds } from "./workholds.js";
@@ -317,7 +318,7 @@ const BASE_TOOLS: Anthropic.Messages.ToolUnion[] = [
   {
     name: "search_email",
     description:
-      "Search email. account='school' (default) is the dedicated inbox that receives all forwarded school mail — use it for 'did the school say…', permission slips, teacher notes, dates. account='alex' or 'sam' is that parent's own Gmail (if they've connected it) — use it for receipts, orders, invitations, confirmations, subscriptions; Gmail search syntax works (from:, subject:, has:attachment). Returns newest-first date/sender/subject with a short snippet and an [id]. Kimi's own inbox (school) is also where family members forward things to you. To know what an email actually says (dates, times, places, links), open it with read_email.",
+      "Search email. With no account, searches every inbox: school mail mostly arrives in the parents' own Gmail (Kimi watches it), and Kimi's inbox ('school') is where family members forward things. Pass account='school', 'alex' or 'sam' to look in just one; Gmail search syntax works (from:, subject:, has:attachment). Returns newest-first date/sender/subject with a short snippet and an [id]. To know what an email actually says (dates, times, places, links), open it with read_email.",
     input_schema: {
       type: "object",
       properties: {
@@ -567,6 +568,7 @@ const CHAT_ONLY_TOOLS: Anthropic.Messages.ToolUnion[] = [
       properties: {
         goal: { type: "string", description: "One clear sentence: what outcome to achieve." },
         details: { type: "string", description: "Everything the task needs: site/URL if known, names, dates, options, constraints, budget cap, which saved login to use." },
+        separate: { type: "boolean", description: "True when a similar-looking job is already running but this is a different one (a second order from the same store) — it gets its own task and its own approval." },
       },
       required: ["goal"],
     },
@@ -700,6 +702,7 @@ const BROWSER_TOOLS: Anthropic.Messages.ToolUnion[] = [
       properties: {
         description: { type: "string", description: "Precise: 'Pay $185 to City Parks & Rec for Max — Fall Soccer (Sat 10am) with the card saved on the site.'" },
         includeScreenshot: { type: "boolean", description: "Attach a screenshot of the page (default true)." },
+        changed: { type: "string", description: "Only when this job was already approved: what's different from what they approved (out of stock, a new price, another date). A step that matches the approval needs no second ask." },
       },
       required: ["description"],
     },
@@ -730,6 +733,28 @@ function commits(label: string): boolean {
   if (!l || (SIGNIN_STEP_RE.test(l) && !COMMIT_RE.test(l))) return false;
   if (COMMIT_RE.test(l)) return true;
   return SOFT_COMMIT_RE.test(l) && !SAFE_RE.test(l);
+}
+
+// Words that might commit something, depending on the page: "Pay & continue", "Yes, I'll attend",
+// "Sign Up", "Accept", "Claim spot". The word lists can't tell; a model reading the label and the
+// page can.
+const MAYBE_COMMIT_RE = /\b(pay|submit|confirm|send|book|reserve|register|enroll|rsvp|sign ?up|attend|attending|going|accept|apply|request|claim|join|agree|finish|complete|done|yes)\b/i;
+async function commitsHere(label: string, page: { url: () => string; title: () => Promise<string> }): Promise<boolean> {
+  if (commits(label)) return true;
+  const l = label.replace(/\s+/g, " ").trim();
+  if (!l || !MAYBE_COMMIT_RE.test(l) || (SIGNIN_STEP_RE.test(l) && !/\b(pay|order|book|register|rsvp)\b/i.test(l))) return false;
+  try {
+    const res = await client.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 5,
+      messages: [{ role: "user", content: `On the web page "${(await page.title().catch(() => "")).slice(0, 100)}" (${page.url().slice(0, 150)}), would clicking a button labeled "${l.slice(0, 80)}" commit something in the world — pay, place an order, book, register, RSVP, submit a form, send a message, cancel something? Going to a next or review step that still has a final button after it is not. Answer yes or no.` }],
+    });
+    recordUsage("commit_check", "claude-haiku-4-5", res.usage);
+    const t = res.content.find((b) => b.type === "text");
+    return !(t && t.type === "text" && /^\s*no\b/i.test(t.text));
+  } catch {
+    return true; // can't tell: treat it as a commit
+  }
 }
 
 // ── Tool execution ───────────────────────────────────────────────────────────
@@ -788,9 +813,28 @@ async function homeAddress(): Promise<string> {
 }
 
 const PARENT_EMAILS = [CONFIG.parents.alex.email, CONFIG.parents.sam.email].map((e) => e.toLowerCase());
-// Mail about the parents' money: not for a chat with Grandma.
-const MONEY_RE = /\b(receipt|your order|order (confirmation|#|number)|invoice|payment|paid|statement|bank|banking|venmo|paypal|zelle|chase|amex|american express|citi|wells fargo|capital one|schwab|fidelity|vanguard|robinhood|coinbase|tax(es)?|irs|payroll|pay ?stub|salary|bill(ing)?|credit card|balance|refund)\b/i;
-const caregiverOffLimits = (m: { from?: string; subject?: string }) => MONEY_RE.test(`${m.from || ""} ${m.subject || ""}`);
+/**
+ * Which of these emails are the parents' own business — their money (banks, cards, taxes, pay,
+ * their own purchases) or their personal correspondence — and so not for a chat with Grandma. Judged
+ * by what each is about: "Field trip payment due" or a lunch-balance notice is the kids' logistics.
+ * On any failure, all of them are withheld.
+ */
+async function parentsOwn(items: { from?: string; subject?: string; snippet?: string }[]): Promise<boolean[]> {
+  if (!items.length) return [];
+  try {
+    const res = await client.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 300,
+      messages: [{ role: "user", content: `A family's grandmother helps with the kids. Which of these emails are the PARENTS' OWN business — their money (banking, credit cards, investments, taxes, pay, bills, their own shopping and receipts) or personal correspondence — rather than the kids' and household logistics (school, activities, daycare, the kids' fees and payments, schedules)?\n${items.map((m, i) => `${i}. From: ${(m.from || "").slice(0, 80)} | ${(m.subject || "").slice(0, 120)}${m.snippet ? ` — ${m.snippet.slice(0, 160)}` : ""}`).join("\n")}\nReply with ONLY a JSON array of the parents'-own indices, e.g. [1,4]; [] if none.` }],
+    });
+    recordUsage("caregiver_mail", "claude-haiku-4-5", res.usage);
+    const text = res.content.find((b) => b.type === "text");
+    const arr = JSON.parse((text && text.type === "text" ? text.text : "").match(/\[[\d,\s]*\]/)?.[0] || "x");
+    return items.map((_, i) => arr.includes(i));
+  } catch {
+    return items.map(() => true);
+  }
+}
 
 const hostOf = (url: string) => {
   try {
@@ -1001,7 +1045,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
     case "search": {
       const q = String(input?.query || "").toLowerCase().trim();
       if (!q) return "empty query";
-      // Word by word, not the whole phrase: "MGE winter break" finds "Winter Break", "spring
+      // Word by word, not the whole phrase: "Lincoln winter break" finds "Winter Break", "spring
       // gala dinner" finds "Spring Fundraiser" whose notes say gala. All words first;
       // if nothing has them all, the best partial matches.
       const STOP = new Set(["the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at", "with", "our", "my", "is", "are", "event", "events"]);
@@ -1029,7 +1073,8 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         const full = scored.filter(([, v]) => v === 1);
         // Partial: most of the words, and at least two of them (one stray word is noise).
         const best = full.length ? full : words.length >= 3 ? scored.filter(([, v]) => v >= 2 / 3 && v * words.length >= 2).sort((a, b) => b[1] - a[1]) : [];
-        return { items: best.slice(-n).map(([x]) => x), partial: !full.length && best.length > 0 };
+        // Full matches: the most recently filed n. Partial: the best-scoring n.
+        return { items: (full.length ? best.slice(-n) : best.slice(0, n)).map(([x]) => x), partial: !full.length && best.length > 0 };
       };
       const out: string[] = [];
       const evs = vis(events);
@@ -1149,11 +1194,13 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       if (evt.allDay) {
         evt.start = undefined;
         evt.end = undefined;
-      } else {
-        // Times given by the assistant are Pacific wall-clock.
+      } else if (set.start !== undefined || set.end !== undefined || set.date) {
+        // New times given by the assistant are Pacific wall-clock, on one day. A change to anything
+        // else (notes, place) leaves a flight's zones or a multi-day span alone.
         evt.startTz = HOME_TZ;
         evt.endTz = HOME_TZ;
         evt.endDate = undefined;
+        settleTimes(evt);
       }
       if (set.location !== undefined) evt.location = set.location || undefined;
       if (set.notes !== undefined) evt.prep = set.notes || undefined;
@@ -1198,7 +1245,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       if (dup) return `Already tracked — not adding a duplicate: ${fmtTodo(dup)}`;
       await appendItems("todos", [todo]);
       // Say where it shows (not just "your list").
-      return `Added${keptNote(todo)} to-do: ${fmtTodo(todo)}\n(In the app: Agenda → ${todo.due ? `under ${todo.due}` : "Anytime, at the top (no due date)"}${todo.due ? "; the morning text lists it when it's due" : ""}. Say where, not "your list".)`;
+      return `Added${keptNote(todo)} to-do: ${fmtTodo(todo)}\n(In the app: Agenda → ${todo.due ? `under ${todo.due}` : "Anytime, at the top (no due date)"}${todo.due ? "; the morning text lists it when it's due" : "; the morning text mentions it tomorrow and on Sundays"}. Say where, not "your list".)`;
     }
     case "update_todo": {
       const todos = await getCollection("todos");
@@ -1214,7 +1261,12 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
     case "complete_todo": {
       const todos = await getCollection("todos");
       const q = String(input?.title || "").toLowerCase();
-      const t = todos.find((x) => x.id === input?.id && seeable(x)) || (q ? todos.find((x) => !x.done && seeable(x) && x.title.toLowerCase().includes(q)) : undefined);
+      let t = todos.find((x) => x.id === input?.id && seeable(x));
+      if (!t && q) {
+        const hits = todos.filter((x) => !x.done && seeable(x) && x.title.toLowerCase().includes(q));
+        if (hits.length > 1) return `error: ${hits.length} open to-dos match "${q}" — pass the id of the one that's done:\n${hits.map(fmtTodo).join("\n")}`;
+        t = hits[0];
+      }
       if (!t) return "error: no matching open to-do";
       t.done = true;
       await setCollection("todos", todos);
@@ -1278,11 +1330,12 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
             : []
       );
       const said = last.content.find((b) => b.type === "text");
+      const by = said && said.type === "text" ? said.text.match(/^\[([^·\]]+) ·/)?.[1]?.trim() : undefined;
       const text = String(input?.note || (said && said.type === "text" ? said.text.replace(/^\[[^\]]*\]\n/, "").replace(/\n📎.*$/, "") : "") || "").replace(/^\(no note\)$/, "");
       ctx.filed = true;
       // The note itself stays in this chat; private: true keeps what's filed here too.
       const scope = artifactScope(members, task);
-      return describeCapture(await runCapture({ text, images, scope, keep: input?.private === true }));
+      return describeCapture(await runCapture({ text, images, by, scope, keep: input?.private === true }));
     }
     case "react": {
       const emoji = String(input?.emoji || "");
@@ -1320,7 +1373,9 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       return prior ? `Updated [${next.id}]: ${prior.text} → ${fact}${kept}` : `Remembered [${next.id}] (${topicLabel(topic)}): ${fact}${kept}`;
     }
     case "schedule_followup": {
-      // One-time check-in, stored as its own schedule (so several can be pending at once).
+      // One-time check-in, stored as its own schedule (so several can be pending at once). Only when
+      // someone asks: a scheduled run that schedules the next one is a standing task nobody set up.
+      if (!turnFromPerson(task)) return "error: follow-ups are set up only when someone asks, in this conversation. Offer one in your message instead.";
       const when = String(input?.when || "").trim();
       const m = when.match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}))?/);
       if (!m) return 'error: when must be "YYYY-MM-DD HH:mm" or "YYYY-MM-DD"';
@@ -1334,7 +1389,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
     case "schedule_task": {
       const instruction = String(input?.instruction || "").trim();
       if (!instruction) return "error: instruction required";
-      if (!turnFromPerson(task)) return "error: new schedules are set up only when someone asks — not from a scheduled run. Use schedule_followup for a one-time check-in.";
+      if (!turnFromPerson(task)) return "error: new schedules are set up only when someone asks — not from a scheduled run. Offer it in your message instead.";
       let repeat: Repeat | undefined;
       if (input?.repeat?.freq) {
         const r = input.repeat;
@@ -1519,7 +1574,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
         try {
           // The caregiver gets availability only — never meeting titles or attendees.
           const availabilityOnly = caregiverHere;
-          out.push(`${name}'s work calendar${availabilityOnly ? " (availability only)" : ""}:\n${formatBlocks(await getWorkBlocks(p, from, to), { availabilityOnly })}`);
+          out.push(`${name}'s work calendar${availabilityOnly ? " (availability only)" : ""} — works at ${workplaceOf(p)}:\n${formatBlocks(await getWorkBlocks(p, from, to), { availabilityOnly })}`);
         } catch (e) {
           out.push(`${name}: couldn't read the work calendar (${String((e as Error).message || e).slice(0, 120)}).`);
         }
@@ -1530,26 +1585,38 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const url = String(input?.url || "").trim();
       if (!/^https?:\/\//i.test(url)) return "error: url must start with http(s)://";
       const text = await readUrl(url).catch((e) => `error: ${String(e).slice(0, 200)}`);
-      if (text && !text.startsWith("error:")) return untrusted(`the page at ${hostOf(url)}`, text.slice(0, 8000));
+      if (text && !text.startsWith("error:")) return untrusted(`the page at ${hostOf(url)}`, text);
       return text ? text : "error: the page returned no readable text, even rendered in a browser. Don't fill in what it says from memory or another year's listing: find the official details another way (search_places, web_search, a browser task if it matters), or tell them it's unconfirmed.";
     }
     case "search_email": {
-      const raw = String(input?.account || "school");
-      const account = raw === "personal" ? "alex" : raw === "alex" || raw === "sam" ? raw : "school";
+      const raw = String(input?.account || "");
+      const account = raw === "alex" || raw === "sam" || raw === "school" ? raw : "all";
       const days = Number(input?.days) || 30;
       const limit = Number(input?.limit) || 25;
-      let hits;
-      const other = account === "alex" ? "sam" : "alex";
-      // With Grandma here: school and activity mail, not what the parents wrote (sent mail is in their
-      // voice) or their money (receipts, banks, bills).
+      // With Grandma here: not what the parents wrote (sent mail is in their voice); their money is judged below.
       const exclude = caregiverHere ? "-in:sent -category:purchases" : undefined;
-      if (account === "school") hits = await searchMail({ query: input?.query, days, account: "school", limit, exclude });
-      else if (inboxConfigured(account)) hits = await searchMail({ query: input?.query, days, account, limit, exclude });
-      else if (await gmailConnected(account)) hits = await searchGmail(account, { query: input?.query, days, limit, exclude });
-      else return `error: ${account === "alex" ? "Alex" : "Sam"}'s Gmail isn't connected yet. Only the school inbox${inboxConfigured(other) || (await gmailConnected(other)) ? ` and ${other === "alex" ? "Alex" : "Sam"}'s Gmail` : ""} can be searched.`;
-      if (caregiverHere) hits = hits.filter((h) => !caregiverOffLimits(h));
-      if (!hits.length) return `No ${account} emails matched${input?.query ? ` "${input.query}"` : ""} in the last ${days} days.`;
-      return untrusted("email search results", hits.map((h) => `• ${h.date.slice(0, 10)} | ${h.from} | ${h.subject}${h.snippet ? ` — ${h.snippet}` : ""}${h.id ? ` [${h.id}]` : ""}`).join("\n"));
+      const searchOne = async (a: "school" | "alex" | "sam") =>
+        a === "school" ? searchMail({ query: input?.query, days, account: "school", limit, exclude })
+        : inboxConfigured(a) ? searchMail({ query: input?.query, days, account: a, limit, exclude })
+        : (await gmailConnected(a)) ? searchGmail(a, { query: input?.query, days, limit, exclude })
+        : null;
+      let hits;
+      if (account === "all") {
+        const all = await Promise.all((["school", "alex", "sam"] as const).map((a) => searchOne(a).catch(() => null)));
+        hits = all.flatMap((x) => x || []).sort((a, b) => b.date.localeCompare(a.date)).slice(0, limit);
+      } else {
+        hits = await searchOne(account);
+        if (!hits) return `error: ${account === "alex" ? "Alex" : "Sam"}'s Gmail isn't connected yet — search without an account to look everywhere that is.`;
+      }
+      let withheld = 0;
+      if (caregiverHere) {
+        const own = await parentsOwn(hits);
+        withheld = own.filter(Boolean).length;
+        hits = hits.filter((_, i) => !own[i]);
+      }
+      const held = withheld ? ` (${withheld} more ${withheld === 1 ? "is" : "are"} the parents' own mail, not shown in this chat)` : "";
+      if (!hits.length) return `No ${account === "all" ? "" : `${account} `}emails matched${input?.query ? ` "${input.query}"` : ""} in the last ${days} days${held}.`;
+      return untrusted("email search results", hits.map((h) => `• ${h.date.slice(0, 10)} | ${h.from} | ${h.subject}${h.snippet ? ` — ${h.snippet}` : ""}${h.id ? ` [${h.id}]` : ""}`).join("\n")) + held;
     }
     case "read_email": {
       const id = String(input?.id || "").trim().replace(/^\[|\]$/g, "");
@@ -1560,8 +1627,12 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const msg = g ? await readGmail(account, g[2]).catch(() => null) : await readMail(account, Number(m![2])).catch(() => null);
       if (!msg) return `error: couldn't open ${id} (it may have been deleted) — search again`;
       // (A parent's forward to Kimi's inbox is school mail, fine to open; what a parent wrote from their own Gmail isn't.)
-      if (caregiverHere && (caregiverOffLimits(msg) || (account !== "school" && PARENT_EMAILS.some((e) => msg.from.toLowerCase().includes(e))))) return "error: that one is the parents' own mail (something they wrote, or money) — not opened here";
-      const links = msg.links.slice(0, 15).map((l) => `- ${l.label ? `${l.label}: ` : ""}${l.url}`).join("\n");
+      // What a parent wrote themselves is theirs; what they forwarded is passing something along.
+      const wroteIt = account !== "school" && PARENT_EMAILS.some((e) => msg.from.toLowerCase().includes(e)) && !isForward(msg);
+      if (caregiverHere && (wroteIt || (await parentsOwn([{ from: msg.from, subject: msg.subject, snippet: msg.text.slice(0, 300) }]))[0])) return "error: that one is the parents' own mail (something they wrote, or their money) — not opened here";
+      // Every link, most promising first (a newsletter's sign-up link can be far down the list).
+      const best = pickLinks(msg.links, 15);
+      const links = [...best, ...msg.links.filter((l) => !best.includes(l))].slice(0, 60).map((l) => `- ${l.label ? `${l.label}: ` : ""}${l.url}`).join("\n");
       return untrusted("an email", [
         `From: ${msg.from}`,
         msg.to ? `To: ${msg.to}` : "",
@@ -1584,7 +1655,9 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const who = memberName(task.owner);
       (child.thread as Anthropic.MessageParam[]).push({ role: "user", content: `[${who} · ${task.channel} · ${nowPT()} PT]\n${instructions}` });
       // The safety check judges against the parent's request — including how they've refined it since.
-      child.parentRequest = `${parentRequestOf(child)}\n\nLATER (${nowPT()} PT) — PARENT'S OWN WORDS:\n${recentParentWords(task)}\nASSISTANT'S UPDATED BRIEF: ${instructions}`.slice(-4000);
+      child.parentRequest = `${parentRequestOf(child)}\n\nLATER (${nowPT()} PT) — PARENT'S OWN WORDS:\n${recentParentWords(task)}\nASSISTANT'S UPDATED BRIEF: ${instructions}`;
+      // The safety check reads the parent's original words first: trim the middle, never the head.
+      if (child.parentRequest.length > 4000) child.parentRequest = `${child.parentRequest.slice(0, 2000)}\n[…]\n${child.parentRequest.slice(-2000)}`;
       pushLog(child, { at: new Date().toISOString(), kind: "user", who, text: instructions });
       child.waitingOn = undefined;
       if (child.takeover) {
@@ -1611,7 +1684,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       for (const t of await getTaskMetas(await listActiveTaskIds())) {
         if (t.kind !== "browser" || (t.status !== "running" && t.status !== "waiting") || !members.every((m) => canSeeTask(t, m))) continue;
         if (Date.now() - Date.parse(t.updatedAt) > 3 * 3600 * 1000) continue;
-        if (titlesSimilar(t.title, goal)) return `error: browser task ${t.id} ("${t.title}") is already in progress for this — use resume_browser_task with that id instead of starting another.`;
+        if (titlesSimilar(t.title, goal) && input?.separate !== true) return `error: browser task ${t.id} ("${t.title}") is already in progress and looks like the same job — use resume_browser_task with that id. If this is a different job, call again with separate: true.`;
       }
       // Is this job something the parent actually asked for (not an instruction from an email or page)?
       const parentWords = recentParentWords(task);
@@ -1659,7 +1732,7 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const { page } = await ensureBrowser(ctx);
       const label = await web.elementText(page, n);
       const approved = !!task.approvedUntil && Date.parse(task.approvedUntil) > Date.now();
-      const committing = commits(label);
+      const committing = await commitsHere(label, page);
       if (committing && !approved) {
         return `BLOCKED: [${n}] "${label.slice(0, 60)}" looks like an irreversible step. Call request_approval first, describing exactly what will happen; once a parent approves, retry the click.`;
       }
@@ -1692,10 +1765,10 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
       const text = String(input?.text || "").trim();
       if (!text) return "error: text required";
       const approved = !!task.approvedUntil && Date.parse(task.approvedUntil) > Date.now();
-      if (commits(text) && !approved) {
-        return `BLOCKED: "${text.slice(0, 60)}" looks like an irreversible step. Call request_approval first, describing exactly what will happen; once a parent approves, use browse_click on its [n] so the safety check sees it.`;
+      if ((commits(text) || MAYBE_COMMIT_RE.test(text)) && !approved) {
+        return `BLOCKED: "${text.slice(0, 60)}" may be an irreversible step. Call request_approval first, describing exactly what will happen; once a parent approves, use browse_click on its [n] so the safety check sees it.`;
       }
-      if (commits(text)) return `For irreversible steps use browse_click on the element's [n] (browse_read lists it), so the safety check can review it.`;
+      if (commits(text) || MAYBE_COMMIT_RE.test(text)) return `For a step that may be irreversible, use browse_click on the element's [n] (browse_read lists it), so the safety check can review it.`;
       const { page } = await ensureBrowser(ctx);
       const label = await web.clickText(page, text, Math.max(0, Number(input?.nth) || 0)).catch((e) => `error: ${String(e).split("\n")[0].slice(0, 160)}`);
       // What it actually clicked can be a commit even when the words asked for weren't ("Pay" matched "Pay $40 now").
@@ -1897,8 +1970,8 @@ async function runTool(name: string, input: any, ctx: RunCtx): Promise<ToolOut> 
     case "request_approval": {
       const description = String(input?.description || "").trim();
       if (!description) return "error: description required";
-      if (task.approvedUntil && Date.parse(task.approvedUntil) > Date.now()) {
-        return `Already approved for this task (${task.approvedFor || "earlier step"}) — no need to ask again. Proceed and finish.`;
+      if (task.approvedUntil && Date.parse(task.approvedUntil) > Date.now() && !String(input?.changed || "").trim()) {
+        return `Already approved for this task (${task.approvedFor || "earlier step"}) — no need to ask again if this step is what they approved: proceed and finish. If it differs (item, price, date, recipient), call request_approval again with "changed" saying how.`;
       }
       let shot: string | undefined;
       let url: string | undefined;
@@ -1964,7 +2037,7 @@ BROWSER TASK MODE — you are working a background job in a real web browser on 
 - Logins: list_credentials, then browse_fill_credential for BOTH username and password (and field='otp' if the site asks for an authenticator code and the login has one). Never ask for, type, or guess a password.
 - Approval: ask ONCE per job, right before the first click that commits money, a booking, a registration, a cancellation, or a message. Get everything in order first (cart, address, shipping, payment method, review page), then call request_approval describing the COMPLETE outcome — item(s), total price, ship-to, payment method, date/time — so the parent can say yes once. Getting to the checkout/review page needs no approval. Once approved, finish the job without asking again (the approval covers the whole job, for hours); if you truly must deviate from what was approved (different total, different item), ask again with the difference.
 - Reorders ("my usual X"): the site's order history is the truth, not the brief. If it shows an item the parent clearly buys repeatedly that fits their words, that IS their usual — add it and go to the approval, noting any difference from the brief ("your history shows the 2-pack, not the single"), instead of stopping to ask. Stop to ask only when several different items plausibly fit.
-- Paying: prefer a card already saved on the site. If the site needs a card entered, call list_cards and pick the card the parent named — otherwise a personal card, NEVER a company card unless the parent named it. Name it in request_approval ("pay with Family Visa ending 4242"), and after approval call browse_fill_card. Never type card numbers yourself.
+- Paying: prefer a card already saved on the site. If the site needs a card entered, call list_cards and pick the card the parent named — otherwise a personal card, NEVER a company card unless the parent named it. Name it in request_approval ("pay with <card> ending <last 4>"), and after approval call browse_fill_card. Never type card numbers yourself.
 - A separate safety check reviews payment clicks and card entry against what the parent asked for. If it blocks a step, don't look for another way around it — ask again describing exactly that step, or stop and report.
 - Keep the goal's constraints exactly (airports, dates, nonstop, budget, quantities); never widen them. For a product, confirm it fits what the parent has or said (model, size, generation, version) before asking approval, and say so in the approval — not after the purchase.
 - Travel bookings: legal names, dates of birth, and loyalty numbers come from get_travelers; passport and Known Traveler numbers go in with browse_fill_travel_doc (never ask for them or type them). Flag a passport that expires within 6 months of an international trip before booking.
@@ -2004,7 +2077,7 @@ It is also the family GROUP TEXT (Alex, Sam, and you on their phones): messages 
   const notes = await getPrivateNotes(p);
   return `THIS CONVERSATION: ${name}'s PRIVATE "Just me" chat — only ${name} and you. ${other} can't see it (it's also where ${name}'s one-on-one texts with you land).
 - Ordinary household logistics still go on the SHARED family calendar and to-dos as usual; say so when you file ("added to the family calendar").
-- Anything that should stay between you — a surprise or gift for ${other}, something personal, or anything ${name} asks to keep private — file with private: true. Private events stay off the shared Google Calendar and out of the family chat and digests. When it's unclear which, ask: "Family calendar, or just between us?"
+- Anything that should stay between you — a surprise or gift for ${other}, something personal, or anything ${name} asks to keep private — file with private: true. Private events stay off the shared Google Calendar and out of the family chat and the morning text. When it's unclear which, ask: "Family calendar, or just between us?"
 - remember with private: true saves ${name}'s private notes (e.g. gift ideas); household facts both parents need stay shared.
 - Files, approvals, purchases, schedules, and browser tasks started here are private to ${name} automatically.
 - Never bring up this conversation in the family chat.${notes.length ? `\n${name.toUpperCase()}'S PRIVATE NOTES:\n${notes.map((n) => `- ${n}`).join("\n")}` : ""}`;
@@ -2042,9 +2115,9 @@ Kimi: [😂] A very modern question. Tell him she's strictly cash, and I hear sh
 Sam: Ok book it for Saturday
 Kimi: [👍] Booked for Saturday! You'll get the confirmation email in a sec.
 Alex: Ugh, I forgot the soccer snack sign-up.
-Kimi: Phew, you're not late! It's due Friday and two slots are still open. Want me to grab Saturday? I'll pick something allergy-safe for the boys.
+Kimi: Phew, you're not late! It's due Friday and two slots are still open. Want me to grab Saturday? I'll pick something that works with everyone's allergies.
 Alex: How much did we spend on DoorDash this month?
-Kimi: $64.20 across three orders, Alex (the 3rd, 11th, and 19th). That's from receipts in your inboxes, so anything paid without an emailed receipt won't show.
+Kimi: $X across N orders this month, Alex. That's from receipts in your inboxes, so anything paid without an emailed receipt won't show.
 Sam: Ava has a fever. Do we need to cancel anything tomorrow?
 Kimi: [❤️] Oh no, poor Ava. Nothing to cancel tomorrow — just daycare. I can draft a quick note to Sunny Days so they know she's staying home. Want me to?
 
@@ -2063,7 +2136,7 @@ HOW YOU WORK
 - Weather and travel: for outdoor plans, check get_weather and mention rain or heat when it matters. Event listings include "~N min drive, leave by …" for places a real drive from home — use it when timing matters (who can get there, when to leave).
 - VERIFY BEFORE ASSERTING. When you're unsure whether something is done or still needed — an RSVP, a sign-up, a payment, a registration — or of a detail like a time or place, check before you answer: search_email on BOTH parents' inboxes (one of them often replied from their phone), read_link on the invitation or sign-up link in the event's notes or the email, and a browser task if it's behind a login. Never tell a parent something is open or unknown without having looked. Say what you found and where. The same before OFFERING to do it ("want me to RSVP?"): an event listed with ALREADY DONE (checked off) is done — don't offer it again.
 - Travel: compare flights with search_flights, hotels with search_hotels, and look up local businesses with search_places — seconds, not a browser task. If the household facts name a preferred airline, search it first and book on its own site in a browser task signed in to the family's saved login, adding every traveler's loyalty number, legal name, and date of birth from get_travelers (and Known Traveler / passport numbers with browse_fill_travel_doc). Put a multi-option comparison in a File. When someone mentions a loyalty number or seat preference, save it with save_traveler_info.
-- Research: use web_search (and read_link for a specific page) for the outside world (camps, classes, vendors, hours, prices) and search_email for what's in the inboxes (school inbox, or a parent's own Gmail if connected — pick the account by whose mail it would be). Say briefly where facts came from.
+- Research: use web_search (and read_link for a specific page) for the outside world (camps, classes, vendors, hours, prices) and search_email for what's in the inboxes (all of them unless you know whose mail it is). Say briefly where facts came from.
 - Anything that needs a real browser (register, book, buy, cancel, fill a site's form, check an account) → start_browser_task with a complete, self-contained goal and details. It pauses ONCE for the parents' approval before committing. You cannot make phone calls.
 - While a browser task is in progress, anything the parent sends for it — a verification code, an answer, "go ahead", a change — goes to resume_browser_task with that task's id. Never start a second task for the same job. "Stop / cancel / forget it" → stop_browser_task.
 - Messages arrive tagged with who sent them ([Alex …] or [Sam …]); address the person who wrote.
@@ -2275,6 +2348,9 @@ function lastPlainUserIndex(msgs: Anthropic.MessageParam[], before = msgs.length
 function compactFinishedTurns(msgs: Anthropic.MessageParam[]): Anthropic.MessageParam[] {
   const boundary = lastPlainUserIndex(msgs);
   if (boundary <= 0) return msgs;
+  // The photo or PDF from the turn just before this one stays readable: "ok, file it" comes next.
+  const prev = lastPlainUserIndex(msgs, boundary);
+  const keepMedia = prev >= 0 && typeof msgs[prev].content !== "string" && (msgs[prev].content as Anthropic.ContentBlockParam[]).some((b) => b.type === "image" || b.type === "document") ? prev : -1;
   return msgs.map((m, i) => {
     if (i >= boundary || typeof m.content === "string") return m;
     if (m.role === "assistant") {
@@ -2306,7 +2382,7 @@ function compactFinishedTurns(msgs: Anthropic.MessageParam[]): Anthropic.Message
     let changed = false;
     const content = m.content.map((b): Anthropic.ContentBlockParam => {
       // A photo or PDF someone sent: read in its own turn; afterwards just a placeholder.
-      if (b.type === "image" || b.type === "document") {
+      if ((b.type === "image" || b.type === "document") && i !== keepMedia) {
         changed = true;
         return { type: "text", text: b.type === "image" ? "[photo, read at the time]" : "[PDF, read at the time]" };
       }
@@ -2554,7 +2630,7 @@ export async function runAgent(task: Task, opts: { deadlineMs: number; maxSteps?
 }
 
 /** Handle one inbound message on a task under its lock; returns the reply ("" if deferred). */
-export async function converse(taskId: string, who: Member, channel: Channel, text: string, deadlineMs: number, opts: { log?: boolean; attachments?: Attachment[] } = {}): Promise<{ reply: string; task: Task }> {
+export async function converse(taskId: string, who: Member, channel: Channel, text: string, deadlineMs: number, opts: { log?: boolean; attachments?: Attachment[]; silentOk?: boolean } = {}): Promise<{ reply: string; task: Task }> {
   const got = await acquireTaskLock(taskId, 240);
   if (!got) throw new Error("busy");
   try {
@@ -2564,7 +2640,7 @@ export async function converse(taskId: string, who: Member, channel: Channel, te
     if (owner) task.privateTo = owner;
     addUserMessage(task, who, channel, text, opts);
     await saveTask(task);
-    const reply = await runAgent(task, { deadlineMs });
+    const reply = await runAgent(task, { deadlineMs, silentOk: opts.silentOk });
     return { reply, task };
   } finally {
     await releaseTaskLock(taskId);
@@ -2611,13 +2687,19 @@ function tooLong(task: Task): boolean {
 const ROUNDUP_AT = "07:30";
 const QUIET = { from: "21:00", until: "07:30" };
 
+/**
+ * For every turn Kimi starts herself: her reply IS the text. A note about what she decided not to
+ * send, or why, would reach the very person it's about.
+ */
+const SENT_AS_WRITTEN = `Your reply is texted to them exactly as written. If, having looked, there's nothing they need to hear, end your turn with no text at all — never a note about what you're not sending or why.`;
+
 /** One system-started turn in a chat; returns Kimi's reply (empty: nothing to say; null: the chat was busy). */
 async function systemTurn(threadId: string, owner: Member, content: string, deadlineMs: number): Promise<string | null> {
   if (!(await acquireTaskLock(threadId, 240))) return null;
   try {
     const task = (await getTask(threadId)) || newTask(threadId, "Family chat", owner, "group");
     task.owner = owner;
-    (task.thread as Anthropic.MessageParam[]).push({ role: "user", content });
+    (task.thread as Anthropic.MessageParam[]).push({ role: "user", content: `${content}\n${SENT_AS_WRITTEN}` });
     task.status = "running";
     await saveTask(task);
     return (await runAgent(task, { deadlineMs, silentOk: true })) || "";
@@ -2650,6 +2732,7 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
     for (const group of byMessage.values()) {
       if (Date.now() > deadlineMs - 60_000) break;
       const reply = await systemTurn(chat, "alex", `[system · invitation · ${nowPT()} PT]\nThese invitations arrived and are soon. Nothing goes on the calendar until Alex or Sam decides:\n${group.map(fmtEvent).join("\n")}\nWrite one short text to Alex and Sam asking which (if any) they'll go to — list the options compactly (what, when, RSVP deadline) and say they can answer for all at once ("the Tuesday one", "none"). No to-dos, no calendar changes.`, deadlineMs);
+      if (reply === null) continue; // the chat's busy: next tick
       await markAsked(group.map((e) => e.id));
       await send(reply);
       out.asked += group.length;
@@ -2669,6 +2752,7 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
         const when = (t: string) => { const b = blocks.find((x) => x.title === t)!; const w = utcToWall(new Date(b.start), HOME_TZ); return `${w.date} ${fmt12(w.time)}`; };
         const thread = privateThreadId(p);
         const reply = await systemTurn(thread, p, `[system · work calendar question · ${nowPT()} PT]\nThese entries on ${memberName(p)}'s work calendar have no other attendees, and you can't tell whether each is something they have to be at or a block they place for themselves and can move:\n${titles.map((t) => `• "${t}" (next: ${when(t)})`).join("\n")}\nAsk ${memberName(p)} in one short, friendly text (it helps you plan around their day). When they answer, record each with set_work_block_kind.`, deadlineMs);
+        if (reply === null) continue; // the chat's busy: tomorrow
         await markBlocksAsked(p, titles);
         if (reply && opts.send !== false) await reachOut([p], reply, thread).catch((e) => console.error("work-block question failed", e));
       } catch (e) {
@@ -2709,10 +2793,15 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
   if (!due) return out;
   const [events, todos] = await Promise.all([getCollection("events"), getCollection("todos")]);
   const mine = events.filter(family);
-  const waiting = mine.filter((e) => awaitingDecision(e) && (e.endDate || e.date) >= today);
+  // An undecided invitation: once when it's new, again as its deadline (or the day) nears, and in
+  // Sunday's week ahead — not every morning for a month.
+  const nearing = (e: CalEvent) => (e.invite?.rsvpBy || e.date) <= addDays(today, 3);
+  const waiting = mine.filter((e) => awaitingDecision(e) && (e.endDate || e.date) >= today && (!e.invite?.askedAt || nearing(e) || new Date(`${today}T12:00:00Z`).getUTCDay() === 0));
   const soonTodos = todos.filter((t) => family(t) && !t.done && t.due && t.due <= addDays(today, 2)).sort((a, b) => (a.due || "").localeCompare(b.due || ""));
   const todayEvents = mine.filter((e) => onCalendar(e) && toHomeZone(e).date <= today && (e.endDate || toHomeZone(e).date) >= today);
   const sunday = new Date(`${today}T12:00:00Z`).getUTCDay() === 0;
+  // No due date: mentioned the morning after it's added, then each Sunday — never due, so never listed above.
+  const undated = todos.filter((t) => family(t) && !t.done && !t.due && (sunday || Date.now() - Date.parse(t.createdAt || "") < 86400000));
   const overnight = await pendingAlerts();
   const newHolds = (await Promise.all(holdParents().map(async (p) => (await takeNewHolds(p)).map((h) => `${memberName(p)}: ${h}`)))).flat();
   const week = sunday ? mine.filter((e) => onCalendar(e) && toHomeZone(e).date > today && toHomeZone(e).date <= addDays(today, 7)) : [];
@@ -2723,6 +2812,7 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
     ...(waiting.length ? waiting.map(fmtEvent) : ["(none)"]),
     `2. To-dos overdue or due in the next two days. FIRST check each for proof it's already done (search_email in both inboxes for a confirmation, ticket, or reply; read_email to be sure) — complete_todo the ones that are, and say so in a line. List only what's still open (they can reply "done", "drop it", or "remind me Friday"):`,
     ...(soonTodos.length ? soonTodos.map(fmtTodo) : ["(none)"]),
+    ...(undated.length ? [`Also open with no due date (${sunday ? "the Sunday look at all of them" : "added since yesterday"}) — same check first; they can give one a date, or say "done" or "drop it":`, ...undated.map(fmtTodo)] : []),
     `3. Today, in one line:`,
     ...(todayEvents.length ? todayEvents.map(fmtEvent) : ["(nothing scheduled)"]),
     ...(overnight.length ? [`Also, time-sensitive mail since last night — check each is still open first (not a confirmation, not already handled: search_email, the to-do; not past) and include only what's left, with the step to take:`, ...overnight.map((a) => `• ${a.title} — ${a.summary}`)] : []),
@@ -2730,12 +2820,28 @@ export async function runInvitationsAndRoundup(deadlineMs: number, opts: { force
     ...(sunday ? [`4. Sunday: the week ahead, briefly (the days that matter, not every event):`, ...(week.length ? week.map(fmtEvent) : ["(quiet week)"])] : []),
     `Look up anything you need. Always send it — it's how they know you're on the job: on a quiet day, one short line saying nothing needs them, plus anything on today ("Nothing needs you today. Swim lesson at 4.").`,
   ].join("\n");
-  let reply = await systemTurn(chat, "alex", content, deadlineMs);
-  if (reply !== null) await clearAlerts(overnight.map((a) => a.commId));
-  // The morning text always goes out — its absence should only ever mean something's wrong.
-  if (reply === "") reply = `Morning! Nothing needs you today.${todayEvents.length ? ` Today: ${todayEvents.map((e) => `${e.title}${!e.allDay && e.start ? ` (${fmt12(toHomeZone(e).start)})` : ""}`).join("; ")}.` : ""}`;
-  await markAsked(waiting.map((e) => e.id));
+  let reply = await systemTurn(chat, "alex", content, deadlineMs).catch((e) => (console.error("morning text turn failed", e), ""));
+  if (reply === null) {
+    // The family chat is busy right now: try again on the next tick (until 11).
+    if (!opts.force) await redis.del(`roundup:${today}`);
+    return out;
+  }
+  // The morning text always goes out — its absence should only ever mean something's wrong. No
+  // reply (out of time, or the turn failed) isn't "nothing needs you": say what's actually there.
+  if (reply === "") {
+    const at = (e: CalEvent) => `${e.title}${!e.allDay && e.start ? ` (${fmt12(toHomeZone(e).start)})` : ""}`;
+    const lines = [
+      waiting.length ? `Waiting on your decision: ${waiting.map((e) => `${e.title} (${e.date})`).join("; ")}.` : "",
+      soonTodos.length ? `Due soon: ${soonTodos.map((t) => `${t.title}${t.due ? ` (${t.due})` : ""}`).join("; ")}.` : "",
+      undated.length ? `No due date: ${undated.map((t) => t.title).join("; ")}.` : "",
+      overnight.length ? `Came in overnight: ${overnight.map((a) => a.title).join("; ")}.` : "",
+      todayEvents.length ? `Today: ${todayEvents.map(at).join("; ")}.` : "",
+    ].filter(Boolean);
+    reply = `Morning! ${lines.length ? lines.join("\n") : "Nothing needs you today."}`;
+  }
   await send(reply);
+  await clearAlerts(overnight.map((a) => a.commId));
+  await markAsked(waiting.map((e) => e.id));
   out.roundup = true;
   return out;
 }
@@ -2862,7 +2968,7 @@ export async function runDueSchedules(deadlineMs: number, opts: { taskId?: strin
         const audience = both ? everyone.map(memberName).join(" and ") : s.notifyTo ? `${memberName(s.notifyTo)} (${asker} asked you to send it)` : asker;
         (task.thread as Anthropic.MessageParam[]).push({
           role: "user",
-          content: `[system · scheduled task · ${nowPT()} PT]\n"${s.title}" — ${describeSchedule(s)}; set up by ${asker}.\nDo this now: ${s.instruction}\nLook things up as needed (never from memory), then write the message ${audience} should receive.`,
+          content: `[system · scheduled task · ${nowPT()} PT]\n"${s.title}" — ${describeSchedule(s)}; set up by ${asker}.\nDo this now: ${s.instruction}\nLook things up as needed (never from memory), then write the message ${audience} should receive.\n${SENT_AS_WRITTEN}`,
         });
         pushLog(task, { at: new Date().toISOString(), kind: "system", text: `Scheduled: ${s.title}` });
         task.status = "running";
@@ -2958,7 +3064,7 @@ export async function reachOut(to: Member[], text: string, threadId: string, opt
   }
 }
 
-async function postAsKimi(threadId: string, text: string, why: string): Promise<void> {
+export async function postAsKimi(threadId: string, text: string, why: string): Promise<void> {
   const deadline = Date.now() + 20_000;
   while (!(await acquireTaskLock(threadId, 30))) {
     if (Date.now() > deadline) throw new Error("busy");

@@ -95,10 +95,9 @@ export async function findQuoted(threadId: string, quoted: string): Promise<Task
   return null;
 }
 
-/** Is this Kimi message an offer or question a 👍 can say "yes" to? (Never an approval request.) */
-export function isOffer(e: TaskLogEntry): boolean {
-  if (e.kind !== "assistant" || /APPROVE|DECLINE|Needs your approval/.test(e.text)) return false;
-  return /\?\s*(\p{Extended_Pictographic}|️|\s)*$/u.test(e.text.trim());
+/** A request for approval: a tapback never answers one (that takes APPROVE). */
+export function isApprovalRequest(e: TaskLogEntry): boolean {
+  return /APPROVE|DECLINE|Needs your approval/.test(e.text);
 }
 
 /** The newest message from Kimi in the thread (a 👍 only means "yes" on her latest offer). */

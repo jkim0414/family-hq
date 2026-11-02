@@ -66,6 +66,9 @@ export async function safeFetch(u: string, init: RequestInit = {}): Promise<Resp
 
 const MAX_LINKS = 3;
 const MAX_PAGE_CHARS = 6000;
+// A page Kimi asked for herself (a guest list, a sign-up sheet) is read much further.
+const READ_PAGE_CHARS = 40_000;
+const cut = (t: string, max: number) => (t.length > max ? `${t.slice(0, max)}\n[… ${t.length - max} more characters not shown]` : t);
 const FETCH_TIMEOUT_MS = 8000;
 
 // Links worth following: their anchor text or URL suggests details live there.
@@ -104,7 +107,7 @@ export function pickLinks(links: Link[], max = MAX_LINKS): Link[] {
   return scored.slice(0, max).map((x) => x.l);
 }
 
-async function fetchText(url: string): Promise<{ text: string; finalUrl: string } | null> {
+async function fetchText(url: string, max = MAX_PAGE_CHARS): Promise<{ text: string; finalUrl: string } | null> {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -114,7 +117,7 @@ async function fetchText(url: string): Promise<{ text: string; finalUrl: string 
     if (!/text\/html|text\/plain|application\/xhtml/i.test(ct)) return null;
     const raw = (await r.text()).slice(0, 600_000);
     const body = raw.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<nav[\s\S]*?<\/nav>|<footer[\s\S]*?<\/footer>/gi, " ");
-    return { text: htmlToText(body).replace(/\n{3,}/g, "\n\n").slice(0, MAX_PAGE_CHARS), finalUrl: r.url || url };
+    return { text: cut(htmlToText(body).replace(/\n{3,}/g, "\n\n"), max), finalUrl: r.url || url };
   } catch {
     return null;
   } finally {
@@ -127,7 +130,7 @@ async function fetchText(url: string): Promise<{ text: string; finalUrl: string 
 // known to need JavaScript. Everything else gets the plain fetch only.
 const RENDER_HOST_RE = /(^|\.)(evite\.com|paperlesspost\.com|punchbowl\.com|partiful\.com|signupgenius\.com|greenvelope\.com)$/i;
 
-async function renderText(url: string): Promise<string | null> {
+async function renderText(url: string, max = MAX_PAGE_CHARS): Promise<string | null> {
   // By the page's own host (not anywhere in the URL): this browser is signed in to the family's sites.
   let host = "";
   try { host = new URL(url).hostname; } catch { return null; }
@@ -137,7 +140,7 @@ async function renderText(url: string): Promise<string | null> {
     handle = await web.openBrowser();
     await web.goto(handle.page, url);
     const t = await handle.page.evaluate("(document.body && document.body.innerText) || ''");
-    return String(t).replace(/\n{3,}/g, "\n\n").slice(0, MAX_PAGE_CHARS);
+    return cut(String(t).replace(/\n{3,}/g, "\n\n"), max);
   } catch {
     return null;
   } finally {
@@ -174,10 +177,10 @@ export async function fetchLinkedPages(links: Link[], opts: { max?: number; rend
 
 /** Read one URL as text (plain fetch; hosted-browser render for JS-only invite pages). For the agent's read_link tool. */
 export async function readUrl(url: string): Promise<string> {
-  const got = await fetchText(url);
+  const got = await fetchText(url, READ_PAGE_CHARS);
   let text = got?.text || "";
   if (text.replace(/\s+/g, " ").length < 300) {
-    const rendered = await renderText(got?.finalUrl || url);
+    const rendered = await renderText(got?.finalUrl || url, READ_PAGE_CHARS);
     if (rendered && rendered.length > text.length) text = rendered;
   }
   return text;

@@ -34,8 +34,12 @@ check("holds (dropoff) aren't conflicts", !morning.some((c) => /Dropoff/.test(c.
 check("an evening event after the commute home isn't an office-day conflict", clashesFor(ev("17:00", "18:00"), "alex", officeDay).length === 0);
 check("one morning commute alone doesn't make the evening busy", clashesFor(ev("16:30", "17:30"), "sam", [blk("07:30", "08:00", "Travel", { hold: true, travel: true })]).length === 0);
 check("an entry Kimi can't place (maybe a hold) isn't a conflict on its own", clashesFor(ev("16:30", "17:30"), "sam", [blk("16:30", "17:15", "DNS", { unsure: true })]).length === 0);
-check("a long come-when-you-can event isn't ruled out by a meeting", clashesFor(ev("14:00", "21:00"), "alex", [blk("14:00", "15:00", "Board prep")]).length === 0);
-check("…but being out of office is", clashesFor(ev("14:00", "21:00"), "alex", [{ ...blk("00:00", "00:00", "OOO — conference", { outOfOffice: true }), allDay: true, start: `${D}T00:00:00`, end: "2031-03-13T00:00:00" }]).some((c) => c.kind === "out"));
+check("a come-and-go event isn't ruled out by a meeting", clashesFor(ev("14:00", "21:00", { dropIn: true }), "alex", [blk("14:00", "15:00", "Team sync")]).length === 0);
+check("a long one attended start to finish is (a 9–1:30 field trip)", clashesFor(ev("09:00", "13:30", { dropIn: false }), "alex", [blk("11:00", "12:00", "Team sync")]).some((c) => c.kind === "meeting"));
+check("…and being away on a trip rules out a come-and-go one", clashesFor(ev("14:00", "21:00", { dropIn: true }), "alex", [{ ...blk("00:00", "00:00", "Flight to BOS", { hold: true, trip: true }), allDay: true, start: `${D}T00:00:00`, end: "2031-03-13T00:00:00" }]).some((c) => c.kind === "trip"));
+check("a day off isn't a clash (it's often taken for the event)", clashesFor(ev("09:00", "10:00"), "sam", [{ ...blk("00:00", "00:00", "PTO", { outOfOffice: true }), allDay: true, start: `${D}T00:00:00`, end: "2031-03-13T00:00:00" }, blk("09:00", "09:30", "Team meeting")]).every((c) => c.kind !== "office") && true);
+check("an event someone else has (Grandma) isn't the parents' conflict", responsibleFor(ev("14:00", "15:00", { owner: ["grandma"] })).parents.length === 0);
+check("one shared word isn't the same event", clashesFor(ev("15:15", "15:45", { title: "Parent-teacher conference – Max" }), "alex", [blk("15:00", "16:00", "Conference call w/ vendor")]).some((c) => c.kind === "meeting"));
 const sam = [blk("08:00", "08:40", "Morning check-in", { hold: true }), blk("08:40", "09:10", "Fun Run (volunteer)", { hold: true }), blk("09:00", "10:30", "Team meeting")];
 check("a parent who put the event on their work calendar has planned for it", !!plannedFor(ev("07:30", "10:30"), sam));
 check("an event with no parent named is for whoever takes it", responsibleFor(ev("07:30", "10:30", { owner: [] })).anyOne && !responsibleFor(ev("07:30", "10:30")).anyOne);
@@ -57,7 +61,17 @@ const said = await (async () => {
 })();
 const keyWords = (title: string) => (title.toLowerCase().match(/[a-z]{4,}/g) || []).filter((w) => !["2026", "with", "from", "game", "party", "night"].includes(w)).slice(0, 3);
 const discussed = (title: string) => { const w = keyWords(title); return w.some((x) => said.includes(x)); };
-const flag = first.flags.find((f) => !discussed(f.event.title));
+// The live checks use an event nobody has talked over with Kimi (a settled one she may rightly leave
+// alone): a kid's appointment at the time of a real conflict, in the overlay only.
+const flag = await (async () => {
+  const base = first.flags.find((f) => f.clashes.some((c) => c.kind === "meeting"));
+  if (!base) return undefined;
+  const kid = (await db.getCollection("kids"))[0];
+  const e = { ...base.event, id: `evt-check-appt-${Date.now().toString(36)}`, title: `${kid?.firstName || "Kid"} dentist appointment`, people: kid ? [kid.id] : [], location: undefined, travelMin: undefined, travelFor: undefined, prep: undefined, gcalId: undefined, seriesId: undefined, invite: undefined, commId: undefined };
+  events.push(e);
+  await db.appendItems("events", [e]);
+  return (await findConflicts(events, { only: [e.id] })).flags[0];
+})();
 if (!flag) {
   console.log("(no upcoming family event collides with a work calendar right now — skipping the live part)");
 } else {
@@ -92,7 +106,16 @@ if (!flag) {
   }
 
   // Several at once: every one is raised, including one where the other parent is free.
-  const all = first.flags.filter((f) => f.event.id !== flag.event.id).slice(0, 3);
+  // (Undiscussed copies again: a settled one may rightly be left out.)
+  const kids = await db.getCollection("kids");
+  const kinds = ["eye exam", "piano lesson", "haircut"];
+  const copies = first.flags.slice(0, 3).map((f, i) => {
+    const kid = kids[(i + 1) % Math.max(kids.length, 1)];
+    return { ...f.event, id: `evt-check-many-${i}-${Date.now().toString(36)}`, title: `${kid?.firstName || "Kid"} ${kinds[i]}`, people: kid ? [kid.id] : [], location: undefined, travelMin: undefined, travelFor: undefined, prep: undefined, gcalId: undefined, seriesId: undefined, invite: undefined, commId: undefined };
+  });
+  events.push(...copies);
+  await db.appendItems("events", copies);
+  const all = (await findConflicts(events, { only: copies.map((e) => e.id) })).flags;
   if (all.length) {
     const many = await a.runConflictFlags(Date.now() + 200_000, { thread: `${chat}-many`, only: all.map((f) => f.event.id), send: false });
     console.log(`\nKimi (${all.length} at once):\n${many.text}\n`);

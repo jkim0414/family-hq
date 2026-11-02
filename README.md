@@ -15,12 +15,13 @@ Theo, and Ava) is fictional.
 
 - **Reads the family's email.** Each parent's Gmail is watched read-only (IMAP with a Gmail
   app password). Known senders (school platforms, activities, invites, travel) go straight
-  to filing; everything else is triaged on headers and a short excerpt by a small model, so
-  unrelated mail is never read in full. Links in emails (invites, sign-up pages) are followed
+  to filing, and so does a parent's forward (from any of their addresses, work included);
+  everything else is triaged on headers and a short excerpt by a small model, judging what
+  it's about rather than who sent it, so unrelated mail is never read in full. Links in emails (invites, sign-up pages) are followed
   for details.
 - **Files what matters.** Events go to Google Calendar, to-dos to the list, urgent items to
   the Home briefing. Prep is due before the event (buy it the day before, not the morning
-  of), duplicates from several sources file once, and party invitations get a consistent
+  of), duplicates from several sources file once (a correction still applies), and party invitations get a consistent
   checklist.
 - **Answers and acts in chat.** One conversation shared by both parents, in the app or by
   SMS. Ask about the schedule, hand off a task, or send a photo or PDF: Kimi reads it with
@@ -50,12 +51,14 @@ Theo, and Ava) is fictional.
   day collides with it (a meeting, an office day, a trip), Kimi texts the parents it's for: what
   collides, where each meeting is and whether it has a video link, and what she'd do about it.
   A meeting booked later over an event already checked (by someone who can't see the family
-  calendar) goes to that parent alone, with a note they can forward.
+  calendar) goes to that parent alone, with a note they can forward. A come-and-go event (an
+  open house) only collides with being away; a long one attended start to finish (a field trip)
+  is checked like any other.
 - **Holds on a work calendar.** Optionally, a family event in a parent's working hours gets a
   "DNS – <event>" hold on their work calendar, so whoever books their meetings works around it.
   It's an invitation to the work address, already accepted and sent without email, from a
   calendar of its own — so it works even where a work calendar can't be shared for editing. Holds
-  move with their event and come down when it's gone.
+  move with their event and come down when it's gone; come-and-go events aren't held.
 - **A grandparent (or other caregiver) too.** Optional caregiver role: her own private chat with
   Kimi, plus a shared chat with each parent and one with everyone (each its own group text once
   everyone in it opts in). She sees the calendar, to-dos, and household facts, not spending,
@@ -80,8 +83,8 @@ Theo, and Ava) is fictional.
   them. Payments to people are a Venmo link the parent confirms.
 - **Keeps a spending log** from order and payment receipts in the inboxes.
 - **One morning text.** At 7:30, one text to both parents: invitations waiting on a decision,
-  to-dos overdue or due in the next two days (each checked for proof it's already done first),
-  and today in a line; Sundays add the week ahead. Reply in words ("the Tuesday one", "done",
+  to-dos overdue or due in the next two days (each checked for proof it's already done first;
+  undated ones the morning after they're added, and all of them on Sundays), and today in a line; Sundays add the week ahead. Reply in words ("the Tuesday one", "done",
   "remind me Friday"). It always goes out — a quiet day says so in a line — so a missing one
   means something's wrong. Time-sensitive mail ("permission slip due tomorrow") comes by text
   as it arrives, once Kimi checks it's still open; a confirmation or something already handled
@@ -103,7 +106,7 @@ Theo, and Ava) is fictional.
 - **Repeating events are events.** Every occurrence of a weekly event is mirrored like any
   other; editing a family member's own event changes only its title, time, and place.
 - **Weather and drive times.** The forecast, rain/heat notes for outdoor events, and "leave by"
-  times with a push before it's time to go.
+  times, with a text to whoever's going before it's time to leave.
 - **Speaks as herself.** Kimi sends from her own address and number; she never writes to
   people as a parent.
 - **Treats what she reads as information, not orders.** Emails, web pages, invites, and search

@@ -14,7 +14,6 @@ export const PREP_CONVENTIONS = `PREP CONVENTIONS — use exactly these, one to-
 - Something a kid must bring in (flowers, snacks, supplies) → "Buy <item> for <kid/class>", due the day before (2–3 days if it must be ordered).
 - Potluck / bring a dish → "Make or buy a dish for <event>", due the day before.
 - Field trip → "Sign permission slip for <trip>" (the form's deadline) and "Pack a bag lunch for <kid>" (the day before).
-- A kid's event during a parent's work hours → "Clear work calendar for <event>", due 2 days before.
 Prep is PARENT work: owner = the responsible parent(s), default ["alex","sam"]; people = the kid(s) it's for.`;
 
 export const NAME_COLLISIONS = `NAMES THAT MATCH OUR KIDS: other families' children often share our kids' names (another "Theo", another "Max"). When an invitation or message comes FROM another family (the host or sender isn't Alex or Sam), a child named as the birthday child or host is THEIR child, not ours. Call them "<Name> <Surname>" (e.g. "Theo Nguyen") in titles and to-dos, and never put our kid's id in "people" because of the name.
@@ -27,7 +26,10 @@ WHO IS INVITED: "people" (on the item, the event, and each prep to-do) = OUR kid
 
 import type { Classification } from "./classify.js";
 
+import { CONFIG } from "../../src/data/config.js";
 const OUR_KIDS = ["Max", "Theo", "Ava"];
+// Our own people's birthdays ("Sam's Birthday", "Grandma's Birthday") aren't another child's party.
+const FAMILY = [...OUR_KIDS, ...Object.values(CONFIG.parents).map((p) => p.name.split(" ")[0]), ...Object.values(CONFIG.caregivers).flatMap((c) => [c.name.split(" ")[0], c.callMe])];
 const LEAD_WORDS = new Set(["celebrate", "join", "come", "happy", "race", "party", "invitation", "invited", "rsvp", "welcome", "it's", "its"]);
 const PARTY_RE = /\b(birthday|bday|b-day)\b|\bturning \d|\d+(st|nd|rd|th) (birthday|bday)/i;
 
@@ -56,12 +58,16 @@ export function completePartyPrep(c: Classification, sourceText: string, eventsO
   // usually an invite site's menu (Evite's, every October), not the party's theme.
   const themed = /costume|halloween (party|bash|parade|theme|celebration)|\bboo\b|boo'?tastic|spooky|dress[- ]up|dress up as/i.test(sourceText);
   events.forEach((e, idx) => {
-    if (!PARTY_RE.test(e.title) && !PARTY_RE.test(sourceText.slice(0, 400))) return;
+    // A birthday party by its own title, or a "party" the message opens by calling a birthday —
+    // not every possessive title in a newsletter that says "Happy birthday Ava!".
+    if (!PARTY_RE.test(e.title) && !(/\bparty\b/i.test(e.title) && PARTY_RE.test(sourceText.slice(0, 400)))) return;
+    // From a message, only what the model filed as an invitation (we're guests).
+    if (!eventsOverride && (c.events[idx] as { invitation?: boolean })?.invitation !== true) return;
     const child = birthdayChild(e.title);
-    if (!child || OUR_KIDS.includes(child)) return; // unknown, or one of ours
+    if (!child || FAMILY.includes(child)) return; // unknown, or one of ours ("Theo Nguyen" isn't)
     // Prep for an invitation waits for a yes (forEvent ties it to the event); no RSVP to-do — the
     // parents are asked, and Kimi offers to RSVP once they decide.
-    const invite = !eventsOverride && (c.events[idx] as { invitation?: boolean })?.invitation === true;
+    const invite = !eventsOverride;
     const people = c.people.filter((p) => ["max", "theo", "ava"].includes(p));
     const has = (re: RegExp) => c.todos.some((t) => re.test(t.title));
     const add = (title: string, daysBefore: number) =>

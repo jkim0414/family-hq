@@ -13,12 +13,13 @@ export const CONFIG = {
   },
 
   // Where each parent works: mail about their job (meetings, events at their workplace) is work,
-  // not family business — never filed onto the family calendar.
+  // not family business — never filed onto the family calendar. Judged by what the mail is about,
+  // not the sender's domain (a parent forwards family mail from work too).
   workplaces: {
-    // EDIT: each parent's employer and work email domains.
-    alex: { org: "Acme Corp", domains: ["acme.example"] },
-    sam: { org: "Globex", domains: ["globex.example"] },
-  } as Record<string, { org: string; domains: string[] }>,
+    // EDIT: each parent's employer, and any shorthand their work calendar uses (optional).
+    alex: { org: "Acme Corp" },
+    sam: { org: "Globex", terms: "HQ = the main office" },
+  } as Record<string, { org: string; terms?: string }>,
 
   // Work-calendar holds: a family event during a parent's working hours gets a "DNS – <event>" hold
   // on their work calendar, so whoever books their meetings (and can't see the family calendar) works

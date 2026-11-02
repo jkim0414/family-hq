@@ -270,6 +270,15 @@ export async function listCalendarEvents(from: string, to: string): Promise<RawC
   const cal = await getCal();
   if (!cal) return [];
   const tz = CONFIG.calendar.timeZone;
+  // The household: the parents at any of their addresses (work too — family items get sent there),
+  // and the caregivers.
+  const { parentAddresses } = await import("./workcal.js");
+  const familyAddrs = [
+    CONFIG.calendar.targetCalendarId,
+    ...CONFIG.calendar.alwaysInvite,
+    ...(await Promise.all((["alex", "sam"] as const).map((p) => parentAddresses(p).catch(() => [CONFIG.parents[p].email])))).flat(),
+    ...Object.values(CONFIG.caregivers).map((c) => c.email),
+  ].map((x) => String(x || "").toLowerCase());
   // Every page: a busy stretch can pass 250 events, and a truncated list would make events look deleted.
   const items: calendar_v3.Schema$Event[] = [];
   let pageToken: string | undefined;
@@ -294,7 +303,7 @@ export async function listCalendarEvents(from: string, to: string): Promise<RawC
       const declined = (e.attendees || []).some((a) => a.self && a.responseStatus === "declined");
       // Anyone can put an invitation on a Google Calendar. One from outside the family that no one
       // has accepted is a stranger's text, not the family's plan.
-      const family = [CONFIG.calendar.targetCalendarId, CONFIG.parents.alex.email, CONFIG.parents.sam.email, ...CONFIG.calendar.alwaysInvite].map((x) => String(x || "").toLowerCase());
+      const family = familyAddrs;
       const organizer = (e.organizer?.email || "").toLowerCase();
       const me = (e.attendees || []).find((a) => a.self);
       const strangerInvite = !!organizer && !e.organizer?.self && !family.includes(organizer) && (!me || me.responseStatus === "needsAction");

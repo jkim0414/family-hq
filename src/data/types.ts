@@ -154,6 +154,11 @@ export interface CalEvent {
    * Absent = a fixed date (no school, a scheduled game, an appointment).
    */
   invite?: Invite;
+  /**
+   * A long event people come and go from (an open house, a festival) rather than attend start to
+   * finish: no work hold and no meeting-clash check. Set by filing, else judged (dropin.ts).
+   */
+  dropIn?: boolean;
   /** Estimated drive from home in minutes (set by the travel stage for events with a location). */
   travelMin?: number;
   /** The location string travelMin was computed for — recomputed when the location changes. */

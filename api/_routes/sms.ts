@@ -144,7 +144,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Only the whole message counts ("Ok thanks" or "Send me the schedule" never approves anything),
   // and with several waiting it names one by its code.
   const cmd = text.trim().toLowerCase().replace(/[.!]+$/, "");
-  const said = cmd.match(/^(approve|send|decline)(?:\s+#?(\d{4}))?$/);
+  // (Not "send": it's an ordinary reply to "want me to send it?", which Kimi should hear, not a
+  // shortcut that approves whatever happens to be waiting.)
+  const said = cmd.match(/^(approve|decline)(?:\s+#?(\d{4}))?$/);
   if (isParent(who) && said) {
     const { action: pending, ask } = pickPending(await pendingFor(who), said[2]);
     if (!pending) return twiml(res, `<Message>${smsBody(ask!).replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Message>`);

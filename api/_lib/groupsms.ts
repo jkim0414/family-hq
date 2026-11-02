@@ -72,7 +72,7 @@ function intro(thread: string): string {
   const names = ms.map(memberName);
   const who = names.length === 2 ? names.join(" and ") : `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
   if (thread === MAIN_THREAD)
-    return `Hi ${who}! 👋 This is our family group text. Talk to each other here like normal. When you want me, just say "Kimi" ("Kimi, add swim Tuesday at 4") and I'll answer here for both of you. Everything here also shows up in the Family chat in the app.`;
+    return `Hi ${who}! 👋 This is our family group text, for anything you want me to handle ("add swim Tuesday at 4"); I'll answer here for both of you. Photos and flyers sent here get filed. Everything here also shows up in the Family chat in the app.`;
   return `Hi ${who}! 👋 This is our group text, just the ${ms.length + 1} of us. Ask me anything here and I'll answer for everyone in it. It shows up in your shared chat in the app too.`;
 }
 

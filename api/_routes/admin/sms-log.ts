@@ -17,7 +17,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json?${new URLSearchParams({ ...q, "DateSent>": since, PageSize: "60" })}`, { headers: { authorization: `Basic ${auth}` } });
     if (!r.ok) throw new Error(`Twilio ${r.status}`);
     const data = (await r.json()) as { messages: any[] };
-    return data.messages.map((m) => ({ at: m.date_created, dir: m.direction, status: m.status, error: m.error_code, from: mask(m.from), to: mask(m.to), media: Number(m.num_media) || 0, body: String(m.body || "").slice(0, 40) }));
+    return data.messages.map((m) => ({ at: m.date_created, dir: m.direction, status: m.status, error: m.error_code, from: mask(m.from), to: mask(m.to), media: Number(m.num_media) || 0, segments: Number(m.num_segments) || 0, price: m.price, body: String(m.body || "").slice(0, 40) }));
   };
   try {
     const [inbound, outbound] = await Promise.all([list({ To: KIMI_NUMBER }), list({ From: KIMI_NUMBER })]);

@@ -115,7 +115,7 @@ async function perform(action: Action, by: "alex" | "sam"): Promise<string> {
   switch (action.kind) {
     case "confirm_step": {
       const p = action.payload as StepPayload;
-      await pokeTask(p.taskId, `Approval GRANTED by ${by} for: ${p.description}\nYou have 10 minutes to perform exactly that step. Then continue the task.`, true);
+      await pokeTask(p.taskId, `Approval GRANTED by ${by} for: ${p.description}\nGo ahead with it and finish the job. If what you're about to do turns out different from this (item, price, date, recipient), ask again with request_approval.`, true);
       return "Approved — the task is continuing";
     }
     case "send_email": {

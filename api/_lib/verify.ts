@@ -2,6 +2,24 @@ import { searchMail, inboxConfigured } from "./imap.js";
 import { ATTENDING_RE } from "./links.js";
 import type { Todo } from "../../src/data/types";
 import { getCollection, setCollection, addAudit, redis } from "./db.js";
+import Anthropic from "@anthropic-ai/sdk";
+import { recordUsage } from "./usage.js";
+
+const judge = new Anthropic();
+
+/** Is this email proof that this particular to-do is done? A name and a "confirmed" aren't enough on their own. */
+async function confirms(todo: Pick<Todo, "title" | "detail" | "due">, h: { subject: string; snippet: string; date: string }): Promise<boolean> {
+  const res = await judge.messages.create({
+    model: "claude-haiku-4-5",
+    max_tokens: 5,
+    messages: [{ role: "user", content: `To-do: "${todo.title}"${todo.due ? ` (due ${todo.due})` : ""}${todo.detail ? ` — ${todo.detail.slice(0, 200)}` : ""}
+Email (${h.date.slice(0, 10)}): "${h.subject}" — ${h.snippet.slice(0, 400)}
+Does this email confirm that THIS to-do is already done — the same event or sign-up, not another one with a similar name? Answer yes or no.` }],
+  });
+  recordUsage("verify_done", "claude-haiku-4-5", res.usage);
+  const text = res.content.find((b) => b.type === "text");
+  return !!text && text.type === "text" && /^\s*yes/i.test(text.text);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Check before asking. Some to-dos (RSVP to a party, sign up for a slot) are
@@ -41,7 +59,7 @@ export interface Evidence {
 }
 
 /** Proof that a verifiable to-do is already done, or null. `pageText` = the invite page, if Kimi read it. */
-export async function findCompletion(todo: Pick<Todo, "title">, pageText = ""): Promise<Evidence | null> {
+export async function findCompletion(todo: Pick<Todo, "title" | "detail" | "due">, pageText = ""): Promise<Evidence | null> {
   const rule = VERIFIABLE.find((r) => r.title.test(todo.title));
   if (!rule) return null;
   if (rule.kind === "rsvp" && pageText && ATTENDING_RE.test(pageText)) return { where: "the invitation page says you're attending" };
@@ -50,8 +68,11 @@ export async function findCompletion(todo: Pick<Todo, "title">, pageText = ""): 
   for (const who of ["sam", "alex"] as const) {
     if (!inboxConfigured(who)) continue;
     try {
-      const hits = await searchMail({ account: who, days: 150, query: rule.query(key), limit: 15 });
-      const hit = hits.find((h) => h.subject.includes(key) && rule.confirm.test(`${h.subject} ${h.snippet}`));
+      const hits = await searchMail({ account: who, days: 90, query: rule.query(key), limit: 15 });
+      let hit: (typeof hits)[number] | undefined;
+      for (const h of hits.filter((h) => h.subject.includes(key) && rule.confirm.test(`${h.subject} ${h.snippet}`)).slice(0, 3)) {
+        if (await confirms(todo, h).catch(() => false)) { hit = h; break; }
+      }
       if (hit) {
         const date = new Date(hit.date).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/Los_Angeles" });
         return { where: `${who === "sam" ? "Sam" : "Alex"}'s email: “${hit.subject.slice(0, 90)}” (${date})` };

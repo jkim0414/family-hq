@@ -54,6 +54,11 @@ export interface WorkBlock {
 export type BlockKind = "commitment" | "hold" | "unsure";
 interface KindRecord { kind: BlockKind; by: "model" | "parent"; askedAt?: string }
 const kindKey = (p: Parent) => `workhold:${p}`;
+/** "<employer> (<shorthand its calendar uses>)" — a parent's workplace, for the model reading their calendar. */
+export const workplaceOf = (p: string): string => {
+  const w = CONFIG.workplaces[p];
+  return w ? `${w.org}${w.terms ? ` (${w.terms})` : ""}` : "their job";
+};
 export const normTitle = (t: string) => t.trim().toLowerCase().replace(/\s+/g, " ").slice(0, 120);
 
 export async function getBlockKinds(p: Parent): Promise<Record<string, KindRecord>> {
@@ -74,11 +79,10 @@ export async function markBlocksAsked(p: Parent, titles: string[]): Promise<void
 
 async function judgeTitles(p: Parent, titles: string[]): Promise<Record<string, BlockKind>> {
   if (!titles.length) return {};
-  const work = CONFIG.workplaces[p];
   const res = await judge.messages.create({
     model: "claude-haiku-4-5",
     max_tokens: 1500,
-    messages: [{ role: "user", content: `${p === "sam" ? "Sam" : "Alex"} works at ${work?.org || "their job"}. These entries on their work calendar have no other attendees. For each, decide: "commitment" (somewhere they must be or something scheduled with others: a standing meeting, a shift, a class, a duty, a committee, an event), "hold" (a block they place for themselves and can move: focus/prep time, lunch, travel, email, a reminder), or "unsure".\nTitles:\n${titles.map((t, i) => `${i}. ${t}`).join("\n")}\nReply with JSON only: {"0":"commitment", "1":"hold", ...}` }],
+    messages: [{ role: "user", content: `${p === "sam" ? "Sam" : "Alex"} works at ${workplaceOf(p)}. These entries on their work calendar have no other attendees. For each, decide: "commitment" (somewhere they must be or something scheduled with others: a standing meeting, a shift, a class, a duty, a committee, an event), "hold" (a block they place for themselves and can move: focus/prep time, lunch, travel, email, a reminder), or "unsure".\nTitles:\n${titles.map((t, i) => `${i}. ${t}`).join("\n")}\nReply with JSON only: {"0":"commitment", "1":"hold", ...}` }],
   });
   recordUsage("workholds", "claude-haiku-4-5", res.usage);
   const text = res.content.find((b) => b.type === "text")?.text || "{}";
@@ -109,19 +113,73 @@ async function judgeHolds(p: Parent, blocks: WorkBlock[]): Promise<WorkBlock[]> 
   return blocks;
 }
 
-const TRAVEL_RE = /\b(travel|commute|commuting|drive|driving|train|transit|to the office|to office)\b/i;
-// "UA 123 JFK to DEN", "travel/security", "flight to Denver", "airport".
-const TRIP_RE = /\b(flight|flights|airport|security|boarding|layover)\b|\b[A-Z]{3} ?(to|→|-|–) ?[A-Z]{3}\b|\b(to|from)\s+[A-Z]{3}\b/;
 // Airport codes in a trip hold ("transportation to DEN", "LAX → JFK"): where the parent is going
 // (any but the home airports).
 const AIRPORT_RE = new RegExp(`\\b${CONFIG.homeAirports.map((a) => `(?!${a}\\b)`).join("")}[A-Z]{3}\\b`, "g");
-function classify(title: string, hold: boolean): Pick<WorkBlock, "hold" | "travel" | "trip"> {
-  const trip = hold && (TRIP_RE.test(title) || /\bflight\b/i.test(title));
-  return { hold, trip, travel: hold && !trip && TRAVEL_RE.test(title) };
+function classify(_title: string, hold: boolean): Pick<WorkBlock, "hold" | "travel" | "trip"> {
+  // Commute or trip is judged from the title by a model (placeHolds), not by its letters: "DNS –
+  // School fun run" isn't a flight, and "Drive Max to swim" isn't a trip to the office.
+  return { hold, trip: false, travel: false };
+}
+
+// ── Commute, trip, or neither? ───────────────────────────────────────────────
+// A self-placed block can say where the parent is: commuting (an office day) or traveling (away).
+// Each title is judged once and remembered.
+type PlaceKind = "commute" | "trip" | "other";
+const placeKey = (p: Parent) => `workplace_kind:${p}`;
+const PLACE_MODEL = "claude-sonnet-5-5";
+async function judgePlaces(p: Parent, titles: { title: string; when: string }[]): Promise<Record<string, PlaceKind>> {
+  const res = await judge.messages.create({
+    model: PLACE_MODEL,
+    max_tokens: 1500,
+    messages: [{ role: "user", content: `These are blocks ${p === "sam" ? "Sam" : "Alex"} (who works at ${workplaceOf(p)}) put on their own work calendar, each with when it next happens. For each, decide:
+- "commute": the trip between home and their regular workplace — often just "Travel" or "Commute" at the start or end of a workday. It means they're working on-site that day.
+- "trip": air travel or travel out of town — a flight, an airport or airport code, airport security, transport to an airport. They're away.
+- "other": anything else, including travel to an appointment, to a kid's school, or between buildings during the day; school drop-off; a hold for a family event; focus time; lunch.
+${titles.map((t, i) => `${i}. "${t.title}" (${t.when})`).join("\n")}
+Reply with JSON only: {"0":"commute", "1":"other", ...}` }],
+  });
+  recordUsage("workholds", PLACE_MODEL, res.usage);
+  const text = res.content.find((b) => b.type === "text")?.text || "{}";
+  const j = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+  return Object.fromEntries(titles.map((t, i) => [t.title, (["commute", "trip"].includes(j[String(i)]) ? j[String(i)] : "other") as PlaceKind]));
+}
+async function placeHolds(p: Parent, blocks: WorkBlock[]): Promise<WorkBlock[]> {
+  const candidates = blocks.filter((b) => b.hold && !b.kimiHold && !b.outOfOffice && b.title && b.title !== "Busy");
+  if (!candidates.length) return blocks;
+  const known = ((await redis.hgetall<Record<string, PlaceKind>>(placeKey(p)).catch(() => null)) || {}) as Record<string, PlaceKind>;
+  const fresh = [...new Set(candidates.map((b) => b.title))].filter((t) => !known[normTitle(t)]).slice(0, 60);
+  if (fresh.length) {
+    const when = (t: string) => {
+      const b = candidates.find((x) => x.title === t)!;
+      const s = utcToWall(new Date(b.start), HOME_TZ), e = utcToWall(new Date(b.end), HOME_TZ);
+      return b.allDay ? `all day ${s.date}` : `${new Date(`${s.date}T12:00:00Z`).toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" })} ${fmt12(s.time)}–${fmt12(e.time)}`;
+    };
+    const judged = await judgePlaces(p, fresh.map((t) => ({ title: t, when: when(t) }))).catch(() => null);
+    if (judged) {
+      const upd = Object.fromEntries(fresh.map((t) => [normTitle(t), judged[t]]));
+      await redis.hset(placeKey(p), upd).catch(() => {});
+      Object.assign(known, upd);
+    }
+  }
+  for (const b of candidates) {
+    const k = known[normTitle(b.title)];
+    b.trip = k === "trip";
+    b.travel = k === "commute";
+  }
+  return blocks;
 }
 
 const cfgKey = (p: Parent) => `workcal:${p}`;
 const CACHE_S = 10 * 60;
+
+/** The addresses a parent sends from: their personal email, and their work address (their connected work calendar's). */
+export async function parentAddresses(p: Parent): Promise<string[]> {
+  const out = [(CONFIG.parents as Record<string, { email: string }>)[p]?.email?.toLowerCase()].filter(Boolean) as string[];
+  const w = await getWorkCalConfig(p).catch(() => null);
+  if (w?.source === "google" && w.id.includes("@")) out.push(w.id.toLowerCase());
+  return out;
+}
 
 export async function getWorkCalConfig(p: Parent): Promise<WorkCalConfig | null> {
   return (await redis.get<WorkCalConfig>(cfgKey(p))) ?? null;
@@ -235,7 +293,7 @@ export async function getWorkBlocks(p: Parent, from: Date, to: Date): Promise<Wo
   const key = `workcal_cache:${p}:${from.toISOString().slice(0, 13)}:${to.toISOString().slice(0, 13)}`;
   const cached = await redis.get<WorkBlock[]>(key).catch(() => null);
   if (cached) return cached;
-  const blocks = await judgeHolds(p, cfg.source === "google" ? await readGoogle(cfg.id, from, to) : await readIcs(cfg.id, from, to));
+  const blocks = await judgeHolds(p, await placeHolds(p, cfg.source === "google" ? await readGoogle(cfg.id, from, to) : await readIcs(cfg.id, from, to)));
   await redis.set(key, blocks, { ex: CACHE_S }).catch(() => {});
   return blocks;
 }
@@ -293,7 +351,7 @@ export function summarizeDay(blocks: WorkBlock[], day: string, opts: { officeDay
   const away = todays.filter((b) => b.outOfOffice && !b.allDay);
   // Holds (Dropoff, DNS, travel, focus) aren't meetings; a travel hold means an office day.
   const timed = todays.filter((b) => !b.allDay && !b.outOfOffice && !b.hold);
-  const trips = todays.filter((b) => b.trip && /\b[A-Z]{3} ?(to|→|-|–) ?[A-Z]{3}\b/.test(b.title));
+  const trips = todays.filter((b) => b.trip);
   const officeDay = opts.officeDays !== false && isWeekday(day) && !todays.some((b) => b.trip) && todays.some((b) => b.travel);
   const parts: string[] = [];
   if (officeDay) parts.push("office day");

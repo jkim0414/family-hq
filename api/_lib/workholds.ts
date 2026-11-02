@@ -14,12 +14,11 @@ import type { CalEvent } from "../../src/data/types";
 // address from its own calendar in the family's Google account (CONFIG.workHolds) — Kimi can't write
 // to the work calendar itself. She only ever touches holds she made, and keeps them in step with
 // their family event: moved when it moves, removed when it's gone or no longer theirs.
-// Theirs means named on it, or a kids' event naming no parent. Not held: repeating events, long come-when-you-can ones, anything that already collides with a
+// Theirs means named on it, or a kids' event naming no parent. Not held: repeating events, come-and-go ones (dropIn), anything that already collides with a
 // meeting (that's a conflict text instead), and time they've already blocked themselves.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const HORIZON_DAYS = 42;
-const LONG_MIN = 3 * 60;
 interface HoldRec { gcalId: string; title: string; start: string; end: string }
 const holdsKey = (p: Parent) => `workholds:${p}`;
 const prefKey = (p: Parent) => `workholds_pref:${p}`;
@@ -32,7 +31,6 @@ export async function setHoldPref(p: Parent, eventId: string, hold: boolean): Pr
   await redis.hset(prefKey(p), { [eventId]: hold ? "yes" : "no" });
 }
 
-const minutes = (hhmm?: string) => (hhmm ? Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)) : 0);
 
 /** Is this event theirs to hold time for at all (whatever's on the work calendar)? */
 export function holdable(e: CalEvent, p: Parent, pref: string | undefined, now = Date.now(), kidIds: string[] = []): boolean {
@@ -46,7 +44,7 @@ export function holdable(e: CalEvent, p: Parent, pref: string | undefined, now =
   const w = eventWindow(e);
   if (!w || +w.from <= now || +w.from > now + HORIZON_DAYS * 86400000) return false;
   const h = toHomeZone(e);
-  if (pref !== "yes" && h.end && minutes(h.end) - minutes(h.start) > LONG_MIN) return false;
+  if (pref !== "yes" && e.dropIn) return false;
   const dow = new Date(`${w.day}T12:00:00Z`).getUTCDay();
   if (dow === 0 || dow === 6) return false;
   // In working hours by the event's own time (the drive around it doesn't make a 6 PM dinner a workday thing).

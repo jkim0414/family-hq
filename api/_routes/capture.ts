@@ -8,13 +8,14 @@ import { runCapture } from "../_lib/capture.js";
 // for scripts and tests.)
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") return json(res, 405, { error: "POST only" });
-  if (!(await requireUser(req))) return json(res, 401, { error: "unauthorized" });
+  const user = await requireUser(req);
+  if (!user) return json(res, 401, { error: "unauthorized" });
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const text = (body?.text || "").trim();
     const images = Array.isArray(body?.images) ? body.images : [];
     if (!text && images.length === 0) return json(res, 400, { error: "text or attachment required" });
-    json(res, 200, await runCapture({ text, images, silent: body?.silent === true }));
+    json(res, 200, await runCapture({ text, images, by: user.name.split(" ")[0], silent: body?.silent === true }));
   } catch (err) {
     console.error(err);
     json(res, 500, { error: String(err) });

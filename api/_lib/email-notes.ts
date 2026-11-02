@@ -20,13 +20,15 @@ const emails = (): Record<string, Member> => {
 };
 const FORWARD_RE = /^\s*(fwd?|fw)\s*:/i;
 const FORWARDED_BODY_RE = /(begin forwarded message|-{3,}\s*forwarded message\s*-{3,})/i;
+/** A forward ("Fwd:", or a forwarded-message block near the top). */
+export const isForward = (m: { subject: string; text: string }): boolean => FORWARD_RE.test(m.subject) || FORWARDED_BODY_RE.test(m.text.slice(0, 3000));
 
 /** Who in the family wrote this to Kimi (not a forward), or null. */
 export function noteFrom(m: RawMessage): Member | null {
   const who = emails()[senderAddress(m.from)];
   // A From line can be forged: only mail Gmail authenticated as really from them speaks for them.
   if (!who || !m.fromVerified) return null;
-  if (FORWARD_RE.test(m.subject) || FORWARDED_BODY_RE.test(m.text.slice(0, 3000))) return null;
+  if (isForward(m)) return null;
   return who;
 }
 
